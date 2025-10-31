@@ -3716,6 +3716,9 @@ class OrthoImageAnnotationSystem:
             # アノテーション入り画像を保存
             self.save_annotated_image()
 
+            # 各不具合IDごとの個別全体図を保存
+            self.save_individual_annotated_images()
+
             # 拡張版（v2）CSV/XLSXの出力（メイン保存と同一タイミング）
             try:
                 self.export_v2_csv()
@@ -3773,6 +3776,73 @@ class OrthoImageAnnotationSystem:
         output_path = os.path.join(self.project_path, "アノテーション入り画像フォルダ", 
                                   f"{self.project_name}_annotated.png")
         annotated_image.save(output_path)
+
+    def save_individual_annotated_images(self):
+        """各不具合IDごとに、そのIDのアノテーションのみを配置した全体図を個別に保存"""
+        if not self.current_image:
+            return
+        
+        if not self.annotations:
+            return
+        
+        # 全体図位置フォルダのパスを取得
+        output_folder = os.path.join(self.project_path, "全体図位置フォルダ")
+        os.makedirs(output_folder, exist_ok=True)
+        
+        overall_scale = self._get_annotation_scale("overall")
+        
+        # 各不具合IDごとにループ処理
+        for annotation in self.annotations:
+            try:
+                # 元画像をコピー（各IDごとに新しい画像を作成）
+                annotated_image = self.current_image.copy()
+                draw = ImageDraw.Draw(annotated_image)
+                
+                # 現在のIDのアノテーションのみを描画
+                x = annotation["x"]
+                y = annotation["y"]
+                defect_type = annotation.get("defect_type", "不具合")
+                color = self.defect_types.get(defect_type, "#FF0000")
+                shape = annotation.get("shape", "cross")
+                
+                # アノテーションアイコン/シェイプを描画
+                icon_height = self.draw_annotation_icon_on_image(
+                    annotated_image,
+                    draw,
+                    x,
+                    y,
+                    defect_type,
+                    color,
+                    shape,
+                    overall_scale
+                )
+                
+                # ID番号を描画
+                self._draw_id_label_on_image(
+                    draw,
+                    x,
+                    y,
+                    annotation['id'],
+                    color,
+                    annotated_image.size,
+                    overall_scale,
+                    icon_height,
+                )
+                
+                # ファイル名を生成: ID{id:03d}_全体図_{不具合名}.jpg
+                annotation_id = annotation.get('id', 0)
+                # ファイル名として不適切な文字を置換
+                safe_defect_type = defect_type.replace("/", "_").replace("\\", "_").replace(":", "_")
+                filename = f"ID{annotation_id:03d}_全体図_{safe_defect_type}.jpg"
+                output_path = os.path.join(output_folder, filename)
+                
+                # JPEG形式で保存（品質95%で高品質を保持）
+                annotated_image.save(output_path, 'JPEG', quality=95)
+                
+            except Exception as e:
+                # エラーが発生しても他のIDの処理は続行
+                print(f"[WARN] ID{annotation.get('id', '?')}の全体図生成に失敗しました: {e}")
+                continue
 
     def draw_cross_on_image(self, draw, x, y, color, scale_multiplier=1.0):
         """画像上に十字を描画"""
