@@ -55,6 +55,41 @@
 - `coverage_image`: WebODM coverage の PIL.Image インスタンス
 - 出力ファイル: `annotations.json`, `defect_list.csv`, `defect_list_v2.csv`, `defect_list.xlsx`, `アノテーション入り画像`, `関連画像コピー`
 
+## 主要クラス・関数一覧
+
+### クラス
+- `ODMImageSelector`
+  - WebODM のカバレッジ画像をキャンバスに描画し、ジオリファレンス座標付きの撮影画像を選択するためのウィンドウを提供します。
+  - マーカー描画・プレビュー更新・ズーム処理・画像選択確定など、ODM 資産との連携に必要な UI 操作をカプセル化します。
+- `ThermalVisibleFileDialog`
+  - サーモ画像と可視画像を同時にブラウズ・選択できるドッキング UI を実装したダイアログです。
+  - リスト／サムネイル切替、ページング、ズーム、キーボード操作、レイアウト保存などアセット探索に関するインタラクションを担います。
+- `OrthoImageAnnotationSystem`
+  - 本アプリケーションのメインクラスで、Tkinter ベースの GUI、アノテーション管理、アイコン描画、出力ファイル生成など全体のワークフローを統括します。
+  - プロジェクト保存、ID 採番調整、CSV/XLSX 生成、関連画像コピーといった業務フローを一元的に提供します。
+
+### 関数（モジュールレベル）
+- `normalize_management_level(value)`
+  - 入力値を管理レベル定数（S/A/B/N）に正規化し、未設定や想定外の値を安全な既定値に丸めます。
+- `_odmselector_debug_log(self, msg)`
+  - ODM 画像選択ダイアログのデバッグログをコンソールへ出力するユーティリティです（monkey patch 用）。
+- `_odmselector_update_preview(self, image_path)`
+  - サムネイル／プレビュー枠で表示する画像をリサイズして差し替え、例外発生時はフォールバック表示に切り替えます。
+- `_odmselector_select_image_by_index(self, index)`
+  - カバレッジ上のマーカーとプレビューを連動させつつ、指定インデックスの撮影画像を選択状態に更新します。
+- `_odmselector_create_selector_window(self)`
+  - ODMImageSelector の初期ウィンドウ構築を拡張し、フォルダ選択ボタンやプレビュー領域を備えた UI を生成します。
+- `_odmselector_norm_key(name)`
+  - ファイル名から拡張子と大文字小文字の差異を除いた照合キーを生成し、ジオリファレンス情報との突合を容易にします。
+- `_odmselector_select_images_folder(self)`
+  - 画像フォルダを再帰的に走査してジオリファレンスと一致するファイルをマッピングし、マーカー一覧を再構成します。
+- `_odmselector_update_info(self)`
+  - カバレッジ画像のパスや選択中ファイルを含む情報ラベルを更新し、必要に応じてフォルダ選択を促します。
+- `load_webodm_assets_robust(self)`
+  - WebODM 資産読込処理を強化した関数で、複数フォーマットやワールドファイルへのフォールバックを含む堅牢な解析を提供します（ODMImageSelector に差し替え）。
+- `main()`
+  - Tkinter ルートを生成し `OrthoImageAnnotationSystem` を起動するエントリポイントです。
+
 ## 未実装 / 今後実装予定
 - `select_webodm_folder` 側での georeferencing（csv/txt）の柔軟探索・自動判別
 - プレビュータブで使用するアノテーション画像の選択 UI（仮実装から本実装への置き換え）
