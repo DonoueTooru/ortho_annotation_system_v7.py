@@ -3574,6 +3574,37 @@ class OrthoImageAnnotationSystem:
         current_row += 1
 
         def save_changes():
+            """フォーム項目を保存し、未保存の画像アノテーションがあれば確認する"""
+            # サーモ画像と可視画像の未保存変更をチェック
+            thermal_has_changes = thermal_preview.has_unsaved_changes()
+            visible_has_changes = visible_preview.has_unsaved_changes()
+            
+            # 未保存の画像アノテーションがある場合、確認ダイアログを表示
+            if thermal_has_changes or visible_has_changes:
+                unsaved_types = []
+                if thermal_has_changes:
+                    unsaved_types.append("サーモ画像")
+                if visible_has_changes:
+                    unsaved_types.append("可視画像")
+                
+                message = f"{' と '.join(unsaved_types)}のタブに未保存のアノテーションがあります。\n\n保存しますか？"
+                
+                result = messagebox.askyesnocancel(
+                    "未保存の変更",
+                    message,
+                    parent=dialog
+                )
+                
+                if result is None:  # キャンセル - ダイアログを閉じない
+                    return
+                elif result:  # はい - 未保存の画像アノテーションを保存
+                    if thermal_has_changes:
+                        thermal_preview.confirm()
+                    if visible_has_changes:
+                        visible_preview.confirm()
+                # いいえの場合は保存せずに続行
+            
+            # フォーム項目を保存
             for key, entry in entries.items():
                 annotation[key] = entry.get()
             annotation["defect_type"] = defect_combo.get() or annotation.get("defect_type", "")
