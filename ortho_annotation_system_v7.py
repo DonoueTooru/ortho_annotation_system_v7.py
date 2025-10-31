@@ -2,7 +2,7 @@ import os
 import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 import json
 import csv
 import pandas as pd
@@ -1792,6 +1792,13 @@ class OrthoImageAnnotationSystem:
             "四角": "rectangle"
         }
 
+        self.annotation_scale_vars = {
+            "overall": tk.StringVar(value="1.0"),
+            "thermal": tk.StringVar(value="1.0"),
+            "visible": tk.StringVar(value="1.0"),
+        }
+        self.scale_entries = {}
+
         self.initialize_annotation_icons()
 
         self.setup_ui()
@@ -1847,6 +1854,20 @@ class OrthoImageAnnotationSystem:
         ttk.Button(button_frame, text="保存", command=self.save_project).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="中止", command=self.quit_application).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="色設定", command=self.customize_colors).pack(side=tk.LEFT, padx=(0, 5))
+
+        scale_frame = ttk.Frame(button_frame)
+        scale_frame.pack(side=tk.LEFT, padx=(5, 0))
+
+        scale_config = [
+            ("全体", "overall"),
+            ("サーモ", "thermal"),
+            ("可視", "visible"),
+        ]
+        for label, key in scale_config:
+            ttk.Label(scale_frame, text=f"{label}×").pack(side=tk.LEFT)
+            entry = ttk.Entry(scale_frame, width=5, textvariable=self.annotation_scale_vars[key], justify="right")
+            entry.pack(side=tk.LEFT, padx=(0, 5))
+            self.scale_entries[key] = entry
 
         # 設定選択エリア
         settings_frame = ttk.Frame(control_frame)
@@ -2241,6 +2262,57 @@ class OrthoImageAnnotationSystem:
         self.annotation_icon_tk_cache[key] = tk_icon
         return tk_icon
 
+    def _get_annotation_scale(self, key):
+        var = self.annotation_scale_vars.get(key)
+        if var is None:
+            var = self.annotation_scale_vars.get("overall")
+        if var is None:
+            return 1.0
+        value = var.get()
+        try:
+            scale = float(value)
+            if not math.isfinite(scale) or scale <= 0:
+                raise ValueError
+            return scale
+        except (TypeError, ValueError):
+            scale = 1.0
+            try:
+                var.set("1.0")
+            except Exception:
+                pass
+            return scale
+
+    def _draw_id_label_on_image(self, draw, x, y, annotation_id, color, image_size, scale_multiplier=1.0, icon_height=None):
+        img_w, img_h = image_size
+        base_font_size = max(12, min(24, int(min(img_w, img_h) / 50))) if img_w and img_h else 12
+        font_size = max(8, int(round(base_font_size * scale_multiplier)))
+        font_size = min(font_size, 128)
+        try:
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+        except Exception:
+            try:
+                font = ImageFont.truetype("Arial.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+        stroke_width = max(1, int(round(2 * scale_multiplier)))
+        offset = 25 * scale_multiplier
+        if icon_height:
+            offset = max(offset, (icon_height / 2) + 6 * scale_multiplier)
+        text_x = x + offset
+        text_y = y - offset
+        if img_w:
+            text_x = max(0, min(img_w - 1, text_x))
+        if img_h:
+            text_y = max(0, min(img_h - 1, text_y))
+        draw.text(
+            (text_x, text_y),
+            f"ID{annotation_id}",
+            fill=color,
+            stroke_width=stroke_width,
+            stroke_fill="white",
+            font=font,
+        )
+
     def draw_annotations(self):
         """アノテーションを描画"""
         self.canvas_icon_refs.clear()
@@ -2285,25 +2357,31 @@ class OrthoImageAnnotationSystem:
             elif shape == "rectangle":
                 self.draw_rectangle(x, y, color, annotation['id'])
 
-    def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape):
+    def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape, scale_multiplier=1.0):
+        try:
+            scale_multiplier = float(scale_multiplier)
+        except (TypeError, ValueError):
+            scale_multiplier = 1.0
+        if not math.isfinite(scale_multiplier) or scale_multiplier <= 0:
+            scale_multiplier = 1.0
+
         base_icon = self.load_annotation_icon(defect_type)
         if base_icon is not None:
             icon_w, icon_h = base_icon.size
             base_length = max(image.width, image.height)
-            min_edge = max(16, min(image.width, image.height))
-            target_edge = int(base_length * 0.05)
-            target_edge = max(24, target_edge)
-            target_edge = min(128, target_edge)
-            target_edge = min(target_edge, min_edge)
+            min_dim = max(1, min(image.width, image.height))
+            base_target = min(max(24, int(base_length * 0.05)), max(16, min_dim), 128)
+            target_edge = max(4, int(round(base_target * scale_multiplier)))
+            target_edge = min(target_edge, min_dim)
             scale = target_edge / max(icon_w, icon_h) if max(icon_w, icon_h) else 1.0
             resized_size = (
-                max(1, int(icon_w * scale)),
-                max(1, int(icon_h * scale))
+                max(1, int(round(icon_w * scale))),
+                max(1, int(round(icon_h * scale)))
             )
             icon_image = base_icon.resize(resized_size, Image.Resampling.LANCZOS) if resized_size != base_icon.size else base_icon
 
-            paste_x = int(x - icon_image.width / 2)
-            paste_y = int(y - icon_image.height / 2)
+            paste_x = int(round(x - icon_image.width / 2))
+            paste_y = int(round(y - icon_image.height / 2))
             paste_x = max(0, min(image.width - icon_image.width, paste_x))
             paste_y = max(0, min(image.height - icon_image.height, paste_y))
 
@@ -2311,16 +2389,15 @@ class OrthoImageAnnotationSystem:
             return icon_image.height
 
         if fallback_shape == "cross":
-            self.draw_cross_on_image(draw, x, y, color)
+            return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
         elif fallback_shape == "arrow":
-            self.draw_arrow_on_image(draw, x, y, color)
+            return self.draw_arrow_on_image(draw, x, y, color, scale_multiplier)
         elif fallback_shape == "circle":
-            self.draw_circle_on_image(draw, x, y, color)
+            return self.draw_circle_on_image(draw, x, y, color, scale_multiplier)
         elif fallback_shape == "rectangle":
-            self.draw_rectangle_on_image(draw, x, y, color)
+            return self.draw_rectangle_on_image(draw, x, y, color, scale_multiplier)
         else:
-            self.draw_cross_on_image(draw, x, y, color)
-        return None
+            return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
 
     def draw_cross(self, x, y, color, annotation_id):
         """十字形状を描画"""
@@ -3260,25 +3337,33 @@ class OrthoImageAnnotationSystem:
                 color = self._current_color()
                 shape_code = self._current_shape_code()
                 defect_name = self.defect_combo.get() or self.annotation.get("defect_type")
+                scale_key = self.image_type if self.image_type in ("thermal", "visible") else "overall"
+                annotation_scale = self.outer._get_annotation_scale(scale_key)
 
                 for point in self.working_points:
                     x = point["x"]
                     y = point["y"]
-                    self.outer.draw_annotation_icon_on_image(
+                    icon_height = self.outer.draw_annotation_icon_on_image(
                         working_image,
                         draw,
                         x,
                         y,
                         defect_name,
                         color,
-                        shape_code
+                        shape_code,
+                        annotation_scale
                     )
 
-                    try:
-                        font_size = max(12, min(24, int(min(working_image.width, working_image.height) / 50)))
-                        draw.text((x + 25, y - 25), f"ID{self.annotation['id']}", fill=color, stroke_width=2, stroke_fill="white")
-                    except Exception:
-                        draw.text((x + 25, y - 25), f"ID{self.annotation['id']}", fill=color)
+                    self.outer._draw_id_label_on_image(
+                        draw,
+                        x,
+                        y,
+                        self.annotation['id'],
+                        color,
+                        working_image.size,
+                        annotation_scale,
+                        icon_height,
+                    )
 
                 if getattr(self.outer, "project_path", None):
                     base_dir = os.path.join(self.outer.project_path, "アノテーション入り画像フォルダ")
@@ -3651,6 +3736,7 @@ class OrthoImageAnnotationSystem:
         # 元画像をコピー
         annotated_image = self.current_image.copy()
         draw = ImageDraw.Draw(annotated_image)
+        overall_scale = self._get_annotation_scale("overall")
 
         # アノテーションを描画
         for annotation in self.annotations:
@@ -3660,54 +3746,69 @@ class OrthoImageAnnotationSystem:
             color = self.defect_types.get(defect_type, "#FF0000")
             shape = annotation.get("shape", "cross")
 
-            self.draw_annotation_icon_on_image(
+            icon_height = self.draw_annotation_icon_on_image(
                 annotated_image,
                 draw,
                 x,
                 y,
                 defect_type,
                 color,
-                shape
+                shape,
+                overall_scale
             )
 
             # ID番号を描画
-            try:
-                # フォントサイズを画像サイズに応じて調整
-                font_size = max(12, min(24, int(min(annotated_image.width, annotated_image.height) / 50)))
-                draw.text((x + 25, y - 25), f"ID{annotation['id']}", 
-                         fill=color, stroke_width=2, stroke_fill="white")
-            except:
-                # フォントが利用できない場合はデフォルトで描画
-                draw.text((x + 25, y - 25), f"ID{annotation['id']}", fill=color)
+            self._draw_id_label_on_image(
+                draw,
+                x,
+                y,
+                annotation['id'],
+                color,
+                annotated_image.size,
+                overall_scale,
+                icon_height,
+            )
 
         # 保存
         output_path = os.path.join(self.project_path, "アノテーション入り画像フォルダ", 
                                   f"{self.project_name}_annotated.png")
         annotated_image.save(output_path)
 
-    def draw_cross_on_image(self, draw, x, y, color):
+    def draw_cross_on_image(self, draw, x, y, color, scale_multiplier=1.0):
         """画像上に十字を描画"""
-        size = 20
-        draw.line([(x, y-size), (x, y+size)], fill=color, width=3)
-        draw.line([(x-size, y), (x+size, y)], fill=color, width=3)
+        size = max(6, int(round(20 * scale_multiplier)))
+        line_width = max(1, int(round(3 * scale_multiplier)))
+        draw.line([(x, y - size), (x, y + size)], fill=color, width=line_width)
+        draw.line([(x - size, y), (x + size, y)], fill=color, width=line_width)
+        return size * 2
 
-    def draw_arrow_on_image(self, draw, x, y, color):
+    def draw_arrow_on_image(self, draw, x, y, color, scale_multiplier=1.0):
         """画像上に矢印を描画"""
-        size = 20
-        # 矢印の軸
-        draw.line([(x, y-size), (x, y+size)], fill=color, width=3)
-        # 矢印の先端
-        draw.polygon([(x, y-size), (x-8, y-size+15), (x+8, y-size+15)], fill=color)
+        size = max(6, int(round(20 * scale_multiplier)))
+        line_width = max(1, int(round(3 * scale_multiplier)))
+        head_offset = max(6, int(round(15 * scale_multiplier)))
+        head_width = max(4, int(round(8 * scale_multiplier)))
+        draw.line([(x, y - size), (x, y + size)], fill=color, width=line_width)
+        draw.polygon([
+            (x, y - size),
+            (x - head_width, y - size + head_offset),
+            (x + head_width, y - size + head_offset)
+        ], fill=color)
+        return size * 2
 
-    def draw_circle_on_image(self, draw, x, y, color):
+    def draw_circle_on_image(self, draw, x, y, color, scale_multiplier=1.0):
         """画像上に円を描画"""
-        radius = 25
-        draw.ellipse([(x-radius, y-radius), (x+radius, y+radius)], outline=color, width=3)
+        radius = max(6, int(round(25 * scale_multiplier)))
+        line_width = max(1, int(round(3 * scale_multiplier)))
+        draw.ellipse([(x - radius, y - radius), (x + radius, y + radius)], outline=color, width=line_width)
+        return radius * 2
 
-    def draw_rectangle_on_image(self, draw, x, y, color):
+    def draw_rectangle_on_image(self, draw, x, y, color, scale_multiplier=1.0):
         """画像上に四角を描画"""
-        size = 20
-        draw.rectangle([(x-size, y-size), (x+size, y+size)], outline=color, width=3)
+        size = max(6, int(round(20 * scale_multiplier)))
+        line_width = max(1, int(round(3 * scale_multiplier)))
+        draw.rectangle([(x - size, y - size), (x + size, y + size)], outline=color, width=line_width)
+        return size * 2
 
     def export_to_csv(self):
         """CSV形式で不具合一覧表を出力"""
