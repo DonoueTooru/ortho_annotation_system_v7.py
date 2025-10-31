@@ -3372,12 +3372,21 @@ class OrthoImageAnnotationSystem:
                     base_dir = os.path.join(self.outer.project_path, "アノテーション入り画像フォルダ")
                 else:
                     base_dir = os.path.join(os.path.dirname(self.image_path), "annotated")
-                os.makedirs(base_dir, exist_ok=True)
+                
+                # 画像タイプに応じてサブフォルダを作成
+                if self.image_type == "thermal":
+                    type_dir = os.path.join(base_dir, "サーモ画像フォルダ")
+                elif self.image_type == "visible":
+                    type_dir = os.path.join(base_dir, "可視画像フォルダ")
+                else:
+                    type_dir = base_dir
+                
+                os.makedirs(type_dir, exist_ok=True)
 
                 name, ext = os.path.splitext(os.path.basename(self.image_path))
                 if not ext:
                     ext = ".png"
-                output_path = os.path.join(base_dir, f"ID{self.annotation['id']}_{name}_{self.image_type}_annotated{ext}")
+                output_path = os.path.join(type_dir, f"ID{self.annotation['id']}_{name}_{self.image_type}_annotated{ext}")
 
                 try:
                     file_ext = os.path.splitext(output_path)[1].lower()
