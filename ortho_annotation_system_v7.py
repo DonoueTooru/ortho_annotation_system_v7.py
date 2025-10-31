@@ -3399,6 +3399,19 @@ class OrthoImageAnnotationSystem:
                 self.working_points = copy.deepcopy(self.original_points)
                 self.redraw_overlays()
                 self.status_var.set("編集内容を破棄しました。")
+            
+            def has_unsaved_changes(self):
+                """未保存の変更があるかチェック"""
+                if not self.image_path:
+                    return False
+                # working_pointsとoriginal_pointsを比較
+                if len(self.working_points) != len(self.original_points):
+                    return True
+                # 各ポイントを比較（順序も含めて）
+                for wp, op in zip(self.working_points, self.original_points):
+                    if wp.get("x") != op.get("x") or wp.get("y") != op.get("y"):
+                        return True
+                return False
 
         thermal_preview = ImageAnnotationPreview(
             notebook,
@@ -3562,15 +3575,49 @@ class OrthoImageAnnotationSystem:
             self.draw_annotations()
             dialog.destroy()
 
-        def cancel_changes():
+        def check_unsaved_and_close():
+            """未保存の変更をチェックしてダイアログを閉じる"""
+            # サーモ画像と可視画像の両方で未保存変更をチェック
+            thermal_has_changes = thermal_preview.has_unsaved_changes()
+            visible_has_changes = visible_preview.has_unsaved_changes()
+            
+            if thermal_has_changes or visible_has_changes:
+                # 未保存の変更がある場合、確認ダイアログを表示
+                unsaved_types = []
+                if thermal_has_changes:
+                    unsaved_types.append("サーモ画像")
+                if visible_has_changes:
+                    unsaved_types.append("可視画像")
+                
+                message = f"{' と '.join(unsaved_types)}のタブに未保存のアノテーションがあります。\n\n保存しますか？"
+                
+                result = messagebox.askyesnocancel(
+                    "未保存の変更",
+                    message,
+                    parent=dialog
+                )
+                
+                if result is None:  # キャンセル
+                    return
+                elif result:  # はい（保存する）
+                    # 未保存の変更があるタブの保存を実行
+                    if thermal_has_changes:
+                        thermal_preview.confirm()
+                    if visible_has_changes:
+                        visible_preview.confirm()
+                # いいえの場合は何もせずにダイアログを閉じる
+            
             dialog.destroy()
+        
+        def cancel_changes():
+            check_unsaved_and_close()
 
         button_frame = ttk.Frame(form_frame)
         button_frame.grid(row=current_row, column=0, columnspan=2, pady=20)
         ttk.Button(button_frame, text="保存", command=save_changes).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="キャンセル", command=cancel_changes).pack(side=tk.LEFT, padx=5)
 
-        dialog.protocol("WM_DELETE_WINDOW", cancel_changes)
+        dialog.protocol("WM_DELETE_WINDOW", check_unsaved_and_close)
 
     def update_table(self):
         """テーブルを更新"""
