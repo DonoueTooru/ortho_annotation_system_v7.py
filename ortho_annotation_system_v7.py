@@ -3836,6 +3836,16 @@ class OrthoImageAnnotationSystem:
                 filename = f"ID{annotation_id:03d}_全体図_{safe_defect_type}.jpg"
                 output_path = os.path.join(output_folder, filename)
                 
+                # JPEG保存前にRGBモードに変換（RGBAの場合）
+                if annotated_image.mode == 'RGBA':
+                    # 白背景に合成してRGBに変換
+                    rgb_image = Image.new('RGB', annotated_image.size, (255, 255, 255))
+                    rgb_image.paste(annotated_image, mask=annotated_image.split()[3])
+                    annotated_image = rgb_image
+                elif annotated_image.mode != 'RGB':
+                    # その他のモードもRGBに変換
+                    annotated_image = annotated_image.convert('RGB')
+                
                 # JPEG形式で保存（品質95%で高品質を保持）
                 annotated_image.save(output_path, 'JPEG', quality=95)
                 
