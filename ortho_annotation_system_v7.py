@@ -3835,17 +3835,42 @@ class OrthoImageAnnotationSystem:
                 
                 # 現在のIDのアノテーションのみを描画（座標を調整）
                 x = annotation["x"]
-                y = annotation["y"] + top_offset  # Y座標を上部オフセット分だけ調整
+                defect_y = annotation["y"] + top_offset  # 不具合の位置（上部オフセット分だけ調整）
                 defect_type = annotation.get("defect_type", "不具合")
                 color = self.defect_types.get(defect_type, "#FF0000")
                 shape = annotation.get("shape", "cross")
+                
+                # アノテーションの高さを事前計算（アノテーション下部を不具合位置に合わせるため）
+                # アイコンがある場合はアイコンの高さを推定、ない場合は形状の高さを推定
+                base_icon = self.load_annotation_icon(defect_type)
+                if base_icon is not None:
+                    # アイコンの高さを推定（draw_annotation_icon_on_imageと同じロジック）
+                    icon_w, icon_h = base_icon.size
+                    base_length = max(annotated_image.width, annotated_image.height)
+                    min_dim = max(1, min(annotated_image.width, annotated_image.height))
+                    base_target = min(max(24, int(base_length * 0.05)), max(16, min_dim), 128)
+                    target_edge = max(4, int(round(base_target * overall_scale)))
+                    target_edge = min(target_edge, min_dim)
+                    scale = target_edge / max(icon_w, icon_h) if max(icon_w, icon_h) else 1.0
+                    estimated_height = max(1, int(round(icon_h * scale)))
+                else:
+                    # アイコンがない場合は形状の高さを推定
+                    if shape in ["cross", "arrow", "rectangle"]:
+                        estimated_height = max(6, int(round(20 * overall_scale))) * 2
+                    elif shape == "circle":
+                        estimated_height = max(6, int(round(25 * overall_scale))) * 2
+                    else:
+                        estimated_height = max(6, int(round(20 * overall_scale))) * 2
+                
+                # アノテーション描画位置を計算（下部が不具合位置に来るように上方向に調整）
+                annotation_y = defect_y - estimated_height / 2
                 
                 # アノテーションアイコン/シェイプを描画
                 icon_height = self.draw_annotation_icon_on_image(
                     annotated_image,
                     draw,
                     x,
-                    y,
+                    annotation_y,
                     defect_type,
                     color,
                     shape,
@@ -3856,7 +3881,7 @@ class OrthoImageAnnotationSystem:
                 self._draw_id_label_on_image(
                     draw,
                     x,
-                    y,
+                    annotation_y,
                     annotation['id'],
                     color,
                     annotated_image.size,
