@@ -1798,6 +1798,9 @@ class OrthoImageAnnotationSystem:
             "visible": tk.StringVar(value="1.0"),
         }
         self.scale_entries = {}
+        
+        # 画像拡張設定（個別全体図保存時に使用）
+        self.image_extension_ratio = 1/3  # デフォルト: 元画像の高さの1/3を上下に追加
 
         self.initialize_annotation_icons()
 
@@ -3777,6 +3780,37 @@ class OrthoImageAnnotationSystem:
                                   f"{self.project_name}_annotated.png")
         annotated_image.save(output_path)
 
+    def _create_extended_image(self, original_image):
+        """
+        画像の上下に白色背景を追加して拡張する
+        
+        Args:
+            original_image: 元画像（PIL Image）
+        
+        Returns:
+            tuple: (拡張画像, 上部オフセット)
+        """
+        width, height = original_image.size
+        
+        # 拡張サイズを計算
+        total_extension = int(height * self.image_extension_ratio)
+        top_extension = total_extension // 2
+        bottom_extension = total_extension - top_extension
+        
+        # 拡張後の画像サイズ
+        new_height = height + top_extension + bottom_extension
+        
+        # 元画像のモードに合わせて白色背景の新画像を作成
+        if original_image.mode == 'RGBA':
+            extended_image = Image.new('RGBA', (width, new_height), (255, 255, 255, 255))
+        else:
+            extended_image = Image.new(original_image.mode, (width, new_height), (255, 255, 255))
+        
+        # 元画像を上部オフセット位置にペースト
+        extended_image.paste(original_image, (0, top_extension))
+        
+        return extended_image, top_extension
+
     def save_individual_annotated_images(self):
         """各不具合IDごとに、そのIDのアノテーションのみを配置した全体図を個別に保存"""
         if not self.current_image:
@@ -3794,13 +3828,14 @@ class OrthoImageAnnotationSystem:
         # 各不具合IDごとにループ処理
         for annotation in self.annotations:
             try:
-                # 元画像をコピー（各IDごとに新しい画像を作成）
-                annotated_image = self.current_image.copy()
+                # 画像を拡張（上下に白色背景を追加）
+                extended_image, top_offset = self._create_extended_image(self.current_image)
+                annotated_image = extended_image.copy()
                 draw = ImageDraw.Draw(annotated_image)
                 
-                # 現在のIDのアノテーションのみを描画
+                # 現在のIDのアノテーションのみを描画（座標を調整）
                 x = annotation["x"]
-                y = annotation["y"]
+                y = annotation["y"] + top_offset  # Y座標を上部オフセット分だけ調整
                 defect_type = annotation.get("defect_type", "不具合")
                 color = self.defect_types.get(defect_type, "#FF0000")
                 shape = annotation.get("shape", "cross")
