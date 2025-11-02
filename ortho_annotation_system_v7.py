@@ -16,12 +16,7 @@ from pathlib import Path
 import re
 from io import BytesIO
 
-try:
-    import cairosvg
-    _CAIROSVG_AVAILABLE = True
-except ImportError:
-    cairosvg = None
-    _CAIROSVG_AVAILABLE = False
+# cairosvgは不要になりました（PNG/JPG直接読み込みに変更）
 
 
 try:
@@ -29,6 +24,14 @@ try:
 except ImportError:
     load_workbook = None
     Workbook = None
+
+try:
+    from PIL.ExifTags import TAGS, GPSTAGS
+except ImportError:
+    TAGS = {}
+    GPSTAGS = {}
+
+import difflib
 
 # 管理レベルおよび拡張出力用の定数とユーティリティ
 MANAGEMENT_LEVELS = ['S', 'A', 'B', 'N']
@@ -47,13 +50,14 @@ def normalize_management_level(value):
     return v if v in MANAGEMENT_LEVELS else 'S'
 
 class ODMImageSelector:
-    def __init__(self, parent, annotation, image_type, webodm_path, callback, app_ref=None):
+    def __init__(self, parent, annotation, image_type, webodm_path, callback, app_ref=None, rjpeg_folder=None):
         self.parent = parent
         self.annotation = annotation
         self.image_type = image_type
         self.webodm_path = webodm_path
         self.callback = callback
         self.app_ref = app_ref  # OrthoImageAnnotationSystem インスタンス参照（色設定取得用）
+        self.rjpeg_folder = rjpeg_folder  # R-JPEG画像フォルダ
         
         self.coverage_image = None
         self.coverage_image_path = None
@@ -115,8 +119,18 @@ class ODMImageSelector:
         
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(button_frame, text="R-JPEGフォルダ選択", command=self.select_rjpeg_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(button_frame, text="選択", command=self.confirm_selection).pack(side=tk.RIGHT, padx=(10, 0))
         ttk.Button(button_frame, text="キャンセル", command=self.window.destroy).pack(side=tk.RIGHT)
+
+    def select_rjpeg_folder(self):
+        """R-JPEG画像フォルダを選択してマッチング実行"""
+        folder_path = filedialog.askdirectory(title="R-JPEG画像フォルダを選択")
+        if folder_path:
+            self.rjpeg_folder = folder_path
+            self.match_rjpeg_images()
+            self.display_coverage_image()
+            self.update_info()
 
     def debug_log(self, msg: str):
         """簡易デバッグ出力（コンソール）"""
@@ -147,6 +161,193 @@ class ODMImageSelector:
             self.preview_label.config(text=f"プレビュー失敗: {e}", image="")
             self._odm_preview_imgtk = None
             self.debug_log(f"preview failed: {e}")
+
+    def get_gps_coordinates(self, image_path):
+        """画像からGPS座標を取得"""
+        try:
+            img = Image.open(image_path)
+            exif_data = img._getexif()
+            if not exif_data:
+                return None
+            
+            gps_info = {}
+            for tag, value in exif_data.items():
+                tag_name = TAGS.get(tag, tag)
+                if tag_name == 'GPSInfo':
+                    for gps_tag in value:
+                        gps_tag_name = GPSTAGS.get(gps_tag, gps_tag)
+                        gps_info[gps_tag_name] = value[gps_tag]
+            
+            if not gps_info:
+                return None
+                
+            # GPS座標を10進数に変換
+            lat = self.convert_to_degrees(gps_info.get('GPSLatitude'))
+            lon = self.convert_to_degrees(gps_info.get('GPSLongitude'))
+            
+            if lat is None or lon is None:
+                return None
+            
+            if gps_info.get('GPSLatitudeRef') == 'S':
+                lat = -lat
+            if gps_info.get('GPSLongitudeRef') == 'W':
+                lon = -lon
+                
+            return (lat, lon)
+        except Exception as e:
+            self.debug_log(f"GPS取得エラー ({os.path.basename(image_path)}): {e}")
+            return None
+
+    def convert_to_degrees(self, value):
+        """GPS座標を度分秒から10進数に変換"""
+        try:
+            if not value or len(value) < 3:
+                return None
+            d, m, s = value
+            return float(d) + float(m) / 60 + float(s) / 3600
+        except Exception:
+            return None
+
+    def get_image_timestamp(self, image_path):
+        """画像のEXIF撮影日時を取得"""
+        try:
+            img = Image.open(image_path)
+            exif_data = img._getexif()
+            if exif_data:
+                for tag, value in exif_data.items():
+                    if TAGS.get(tag) == 'DateTimeOriginal':
+                        return datetime.strptime(str(value), '%Y:%m:%d %H:%M:%S')
+            return None
+        except Exception as e:
+            self.debug_log(f"タイムスタンプ取得エラー ({os.path.basename(image_path)}): {e}")
+            return None
+
+    def match_rjpeg_images(self):
+        """R-JPEG画像とWebODM座標を複合マッチング（GPS→ファイル名→タイムスタンプ）"""
+        if not self.rjpeg_folder or not os.path.isdir(self.rjpeg_folder):
+            self.debug_log("R-JPEGフォルダが指定されていません")
+            return
+        
+        self.debug_log(f"R-JPEGマッチング開始: {self.rjpeg_folder}")
+        
+        # R-JPEG画像ファイルを収集
+        rjpeg_files = []
+        for root, dirs, files in os.walk(self.rjpeg_folder):
+            for f in files:
+                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')):
+                    rjpeg_files.append(os.path.join(root, f))
+        
+        self.debug_log(f"R-JPEG画像数: {len(rjpeg_files)}")
+        
+        if not rjpeg_files:
+            self.debug_log("R-JPEG画像が見つかりません")
+            return
+        
+        # WebODM画像位置情報のバックアップ
+        original_positions = list(self.image_positions)
+        
+        # 各WebODM画像位置に対して最適なR-JPEG画像を見つける
+        matched_positions = []
+        
+        for pos in original_positions:
+            webodm_filename = pos['filename']
+            webodm_path = pos['path']
+            webodm_x = pos['x']
+            webodm_y = pos['y']
+            
+            # WebODM画像の情報取得
+            webodm_gps = self.get_gps_coordinates(webodm_path) if os.path.exists(webodm_path) else None
+            webodm_time = self.get_image_timestamp(webodm_path) if os.path.exists(webodm_path) else None
+            webodm_basename = os.path.splitext(os.path.basename(webodm_filename))[0].lower()
+            
+            best_match = None
+            best_score = 0
+            best_reason = ""
+            
+            for rjpeg_path in rjpeg_files:
+                score = 0
+                reasons = []
+                
+                # 1. GPSマッチング（最優先・最も高得点）
+                rjpeg_gps = self.get_gps_coordinates(rjpeg_path)
+                if webodm_gps and rjpeg_gps:
+                    # 距離計算（簡易的なユークリッド距離）
+                    distance = math.sqrt(
+                        (webodm_gps[0] - rjpeg_gps[0])**2 + 
+                        (webodm_gps[1] - rjpeg_gps[1])**2
+                    )
+                    # 閾値: 0.0001度以内（約11m以内）なら高得点
+                    if distance < 0.0001:
+                        gps_score = 100 - (distance * 100000)  # 距離が近いほど高得点
+                        score += gps_score
+                        reasons.append(f"GPS一致(距離:{distance:.6f}度, +{gps_score:.1f}点)")
+                    elif distance < 0.001:  # 約110m以内なら低得点
+                        gps_score = 50 - (distance * 10000)
+                        score += gps_score
+                        reasons.append(f"GPS近似(距離:{distance:.6f}度, +{gps_score:.1f}点)")
+                
+                # 2. ファイル名マッチング（中優先）
+                rjpeg_basename = os.path.splitext(os.path.basename(rjpeg_path))[0].lower()
+                similarity = difflib.SequenceMatcher(None, webodm_basename, rjpeg_basename).ratio()
+                if similarity > 0.6:  # 類似度60%以上
+                    name_score = similarity * 30  # 最大30点
+                    score += name_score
+                    reasons.append(f"名前類似度:{similarity:.2%}(+{name_score:.1f}点)")
+                
+                # 3. タイムスタンプマッチング（補助的）
+                rjpeg_time = self.get_image_timestamp(rjpeg_path)
+                if webodm_time and rjpeg_time:
+                    time_diff = abs((webodm_time - rjpeg_time).total_seconds())
+                    if time_diff < 60:  # 60秒以内
+                        time_score = max(0, 20 - (time_diff / 3))  # 最大20点
+                        score += time_score
+                        reasons.append(f"時刻差:{time_diff:.0f}秒(+{time_score:.1f}点)")
+                    elif time_diff < 300:  # 5分以内
+                        time_score = max(0, 10 - (time_diff / 30))
+                        score += time_score
+                        reasons.append(f"時刻差:{time_diff:.0f}秒(+{time_score:.1f}点)")
+                
+                # 最高スコア更新
+                if score > best_score:
+                    best_score = score
+                    best_match = rjpeg_path
+                    best_reason = ", ".join(reasons)
+            
+            # マッチング結果
+            if best_match and best_score > 20:  # 閾値: 20点以上
+                matched_positions.append({
+                    'filename': os.path.basename(best_match),
+                    'path': best_match,
+                    'x': webodm_x,
+                    'y': webodm_y,
+                    'webodm_original': webodm_filename,
+                    'match_score': best_score,
+                    'match_reason': best_reason
+                })
+                self.debug_log(f"マッチ: {os.path.basename(webodm_filename)} -> {os.path.basename(best_match)} (スコア:{best_score:.1f}, {best_reason})")
+            else:
+                self.debug_log(f"マッチなし: {os.path.basename(webodm_filename)} (最高スコア:{best_score:.1f})")
+        
+        # マッチング結果を適用
+        if matched_positions:
+            self.image_positions = matched_positions
+            self.debug_log(f"マッチング完了: {len(matched_positions)}/{len(original_positions)}件")
+            messagebox.showinfo(
+                "マッチング結果",
+                f"R-JPEG画像のマッチングが完了しました。\n\n"
+                f"WebODM画像: {len(original_positions)}件\n"
+                f"マッチ成功: {len(matched_positions)}件\n"
+                f"マッチ失敗: {len(original_positions) - len(matched_positions)}件"
+            )
+        else:
+            messagebox.showwarning(
+                "マッチング失敗",
+                "R-JPEG画像とWebODM座標のマッチングに失敗しました。\n\n"
+                "以下を確認してください：\n"
+                "- R-JPEG画像にGPS情報が含まれているか\n"
+                "- ファイル名が類似しているか\n"
+                "- 撮影日時が近いか"
+            )
 
     def load_webodm_assets(self):
         """WebODMアセットを読み込み、座標情報を解析する"""
@@ -180,6 +381,10 @@ class ODMImageSelector:
                                 'x': float(parts[1]),
                                 'y': float(parts[2])
                             })
+            
+            # 4. R-JPEG画像とのマッチング（フォルダが指定されている場合）
+            if self.rjpeg_folder and os.path.isdir(self.rjpeg_folder):
+                self.match_rjpeg_images()
             
             self.display_coverage_image()
             self.update_info()
@@ -2191,7 +2396,8 @@ class OrthoImageAnnotationSystem:
                 messagebox.showwarning(
                     "アノテーションアイコン",
                     "プログラムと同じフォルダにある『アノテーション画像フォルダ』からアイコンを読み込めませんでした。\n"
-                    "フォルダ配置とアクセス権限を確認してください。"
+                    "フォルダ配置とアクセス権限を確認してください。\n\n"
+                    "PNG形式のアイコンファイルが必要です。"
                 )
                 self._icon_dir_missing_warned = True
             return
@@ -2206,7 +2412,18 @@ class OrthoImageAnnotationSystem:
         if not sanitized:
             return None
         sanitized = sanitized.replace("/", "_").replace("\\", "_")
-        return os.path.join(self.annotation_icon_dir, f"{sanitized}.svg")
+        # PNG優先、次にJPG/JPEGをフォールバック
+        png_path = os.path.join(self.annotation_icon_dir, f"{sanitized}.png")
+        if os.path.exists(png_path):
+            return png_path
+        jpg_path = os.path.join(self.annotation_icon_dir, f"{sanitized}.jpg")
+        if os.path.exists(jpg_path):
+            return jpg_path
+        jpeg_path = os.path.join(self.annotation_icon_dir, f"{sanitized}.jpeg")
+        if os.path.exists(jpeg_path):
+            return jpeg_path
+        # 見つからない場合はPNGパスを返す（エラーメッセージ用）
+        return png_path
 
     def load_annotation_icon(self, defect_type):
         if defect_type in self.annotation_icon_cache:
@@ -2218,19 +2435,19 @@ class OrthoImageAnnotationSystem:
             self._register_missing_icon(defect_type, f"ファイルが見つかりません: {path}")
             return None
 
-        if not _CAIROSVG_AVAILABLE:
-            self.annotation_icon_cache[defect_type] = None
-            self._register_missing_icon(defect_type, "cairosvg がインストールされていません")
-            return None
-
         try:
-            png_bytes = cairosvg.svg2png(url=path, output_width=256)
-            image = Image.open(BytesIO(png_bytes)).convert("RGBA")
+            # Pillowで直接読み込み（PNG/JPG対応）
+            image = Image.open(path).convert("RGBA")
+            
+            # 標準サイズ（256x256）にリサイズ（必要な場合）
+            if image.size != (256, 256):
+                image = image.resize((256, 256), Image.Resampling.LANCZOS)
+            
             self.annotation_icon_cache[defect_type] = image
             return image
         except Exception as e:
             self.annotation_icon_cache[defect_type] = None
-            self._register_missing_icon(defect_type, f"SVG変換に失敗しました: {e}")
+            self._register_missing_icon(defect_type, f"画像読み込みに失敗しました: {e}")
             return None
 
     def _register_missing_icon(self, defect_type, message):
@@ -2241,8 +2458,9 @@ class OrthoImageAnnotationSystem:
         if not self._icon_warning_shown:
             messagebox.showwarning(
                 "アノテーションアイコン",
-                "アノテーション用SVGアイコンを読み込めませんでした。\n"
-                "フォルダ『アノテーション画像フォルダ』と cairosvg のインストール状況を確認してください。"
+                "アノテーション用アイコンを読み込めませんでした。\n"
+                "フォルダ『アノテーション画像フォルダ』とPNG/JPG形式のアイコンファイルを確認してください。\n\n"
+                "ヒント: convert_svg_to_png.py スクリプトでSVGをPNGに変換できます。"
             )
             self._icon_warning_shown = True
 
