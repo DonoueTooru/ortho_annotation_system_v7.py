@@ -2006,6 +2006,22 @@ class OrthoImageAnnotationSystem:
         
         # 画像拡張設定（個別全体図保存時に使用）
         self.image_extension_ratio = 1/3  # デフォルト: 元画像の高さの1/3を上下に追加
+        
+        # ズームコントロール用の変数
+        self.zoom_options = [
+            ("25%", 0.25),
+            ("50%", 0.5),
+            ("75%", 0.75),
+            ("100%", 1.0),
+            ("125%", 1.25),
+            ("150%", 1.5),
+            ("200%", 2.0),
+            ("300%", 3.0),
+            ("400%", 4.0),
+            ("500%", 5.0),
+        ]
+        self.zoom_var = tk.StringVar(value="100%")
+        self._updating_zoom_var = False
 
         self.initialize_annotation_icons()
 
@@ -2076,6 +2092,27 @@ class OrthoImageAnnotationSystem:
             entry = ttk.Entry(scale_frame, width=5, textvariable=self.annotation_scale_vars[key], justify="right")
             entry.pack(side=tk.LEFT, padx=(0, 5))
             self.scale_entries[key] = entry
+        
+        # ズームコントロール
+        zoom_frame = ttk.Frame(button_frame)
+        zoom_frame.pack(side=tk.LEFT, padx=(10, 0))
+        
+        ttk.Label(zoom_frame, text="表示倍率:").pack(side=tk.LEFT)
+        self.zoom_out_button = ttk.Button(zoom_frame, text="🔍-", width=3, command=self.zoom_out)
+        self.zoom_out_button.pack(side=tk.LEFT, padx=(5, 0))
+        
+        self.zoom_combo = ttk.Combobox(
+            zoom_frame,
+            textvariable=self.zoom_var,
+            values=[label for label, _ in self.zoom_options],
+            state="readonly",
+            width=7
+        )
+        self.zoom_combo.pack(side=tk.LEFT, padx=(5, 0))
+        self.zoom_combo.bind("<<ComboboxSelected>>", self.on_zoom_combo_change)
+        
+        self.zoom_in_button = ttk.Button(zoom_frame, text="🔍+", width=3, command=self.zoom_in)
+        self.zoom_in_button.pack(side=tk.LEFT, padx=(5, 0))
 
         # 設定選択エリア
         settings_frame = ttk.Frame(control_frame)
@@ -2135,6 +2172,12 @@ class OrthoImageAnnotationSystem:
         # テーブルイベント
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Delete>", self.delete_annotation)
+
+        # キーボードショートカット（ズーム操作）
+        self.root.bind("<Control-plus>", lambda e: self.zoom_in())
+        self.root.bind("<Control-equal>", lambda e: self.zoom_in())  # Shift無し+でも対応
+        self.root.bind("<Control-minus>", lambda e: self.zoom_out())
+        self.root.bind("<Control-Key-0>", lambda e: self.set_zoom_factor(1.0))  # 100%にリセット
 
     def select_webodm_folder(self):
         """WebODMのアセットフォルダを選択し、オルソ画像を自動で読み込む"""
@@ -3924,18 +3967,129 @@ class OrthoImageAnnotationSystem:
             self.tree.insert("", tk.END, values=values)
 
     def on_mouse_wheel(self, event):
-        """マウスホイールでズーム"""
-        if self.current_image:
-            # ズーム倍率を調整
+        """マウスホイールでスクロール（縦横対応）"""
+        # Shiftキー押下で横スクロール、通常は縦スクロール
+        if event.state & 0x1:  # Shift押下
+            # 横スクロール
             if event.delta > 0:
-                self.zoom_factor *= 1.1
+                self.canvas.xview_scroll(-1, "units")
             else:
-                self.zoom_factor /= 1.1
-
-            # ズーム倍率の制限
-            self.zoom_factor = max(0.1, min(5.0, self.zoom_factor))
-
-            self.display_image()
+                self.canvas.xview_scroll(1, "units")
+        else:
+            # 縦スクロール
+            if event.delta > 0:
+                self.canvas.yview_scroll(-1, "units")
+            else:
+                self.canvas.yview_scroll(1, "units")
+    
+    def zoom_in(self):
+        """ズームイン（1.25倍ずつ拡大）"""
+        if not self.current_image:
+            return
+        new_zoom = self.zoom_factor * 1.25
+        new_zoom = min(new_zoom, 5.0)  # 最大500%
+        self.set_zoom_factor(new_zoom)
+    
+    def zoom_out(self):
+        """ズームアウト（0.8倍ずつ縮小）"""
+        if not self.current_image:
+            return
+        new_zoom = self.zoom_factor * 0.8
+        new_zoom = max(new_zoom, 0.1)  # 最小10%
+        self.set_zoom_factor(new_zoom)
+    
+    def set_zoom_factor(self, new_zoom, keep_center=True):
+        """ズーム倍率を設定して画像を再描画（中心位置維持オプション）"""
+        if not self.current_image:
+            return
+        
+        old_zoom = self.zoom_factor
+        
+        # 中心位置を計算（keep_center=Trueの場合）
+        if keep_center and self.canvas_image:
+            try:
+                canvas_width = self.canvas.winfo_width()
+                canvas_height = self.canvas.winfo_height()
+                
+                if canvas_width > 1 and canvas_height > 1:
+                    # 現在のスクロール位置を取得
+                    x_scroll_range = self.canvas.xview()
+                    y_scroll_range = self.canvas.yview()
+                    
+                    # 表示領域の中心座標（画像座標系）
+                    center_x = (x_scroll_range[0] + (x_scroll_range[1] - x_scroll_range[0]) / 2) * self.current_image.width
+                    center_y = (y_scroll_range[0] + (y_scroll_range[1] - y_scroll_range[0]) / 2) * self.current_image.height
+                else:
+                    center_x = center_y = None
+            except:
+                center_x = center_y = None
+        else:
+            center_x = center_y = None
+        
+        # ズーム倍率を更新
+        self.zoom_factor = new_zoom
+        
+        # 画像を再描画
+        self.display_image()
+        
+        # 中心位置を維持
+        if center_x is not None and center_y is not None and self.canvas_image:
+            try:
+                canvas_width = self.canvas.winfo_width()
+                canvas_height = self.canvas.winfo_height()
+                
+                if canvas_width > 1 and canvas_height > 1:
+                    # 新しいズーム倍率での画像サイズ
+                    new_img_width = self.current_image.width * self.zoom_factor
+                    new_img_height = self.current_image.height * self.zoom_factor
+                    
+                    # 中心座標から新しいスクロール位置を計算
+                    new_x_scroll = (center_x * self.zoom_factor - canvas_width / 2) / new_img_width
+                    new_y_scroll = (center_y * self.zoom_factor - canvas_height / 2) / new_img_height
+                    
+                    # スクロール位置を調整
+                    self.canvas.xview_moveto(max(0, min(1, new_x_scroll)))
+                    self.canvas.yview_moveto(max(0, min(1, new_y_scroll)))
+            except:
+                pass
+        
+        # 倍率表示を更新
+        self.update_zoom_display()
+    
+    def on_zoom_combo_change(self, event=None):
+        """倍率コンボボックス変更時の処理"""
+        if self._updating_zoom_var:
+            return
+        
+        selected = self.zoom_combo.get()
+        
+        # "100%" → 1.0 に変換
+        for label, value in self.zoom_options:
+            if label == selected:
+                self.set_zoom_factor(value)
+                break
+    
+    def update_zoom_display(self):
+        """現在の倍率をコンボボックスに反映"""
+        if not hasattr(self, 'zoom_combo'):
+            return
+        
+        current_percent = f"{int(self.zoom_factor * 100)}%"
+        
+        # リストにある値なら選択、なければカスタム表示
+        found = False
+        for label, value in self.zoom_options:
+            if abs(value - self.zoom_factor) < 0.01:
+                self._updating_zoom_var = True
+                self.zoom_combo.set(label)
+                self._updating_zoom_var = False
+                found = True
+                break
+        
+        if not found:
+            self._updating_zoom_var = True
+            self.zoom_combo.set(current_percent)
+            self._updating_zoom_var = False
 
     def start_pan(self, event):
         """パン開始"""
