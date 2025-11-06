@@ -5015,23 +5015,153 @@ class OrthoImageAnnotationSystem:
         wb.save(excel_file)
 
     def copy_related_images(self):
-        """関連画像をプロジェクトフォルダにコピー"""
+        """
+        関連画像（サーモ・可視）にアノテーションを描画して保存
+        
+        Requirement 1実装:
+        - アノテーション入り画像のみを保存
+        - オフセット設定を適用
+        - 統一された命名規則: ID{id:03d}_{defect_type}_サーモ異常/可視異常{ext}
+        """
         for annotation in self.annotations:
-            # サーモ画像のコピー
+            annotation_id = annotation['id']
+            defect_type = annotation.get('defect_type', '不具合')
+            x = annotation['x']
+            y = annotation['y']
+            shape = annotation.get('shape', 'cross')
+            color = self.defect_types.get(defect_type, '#FF0000')
+            
+            # サーモ画像の処理
             if annotation.get('thermal_image'):
                 src_path = annotation['thermal_image']
                 if os.path.exists(src_path):
-                    filename = f"ID{annotation['id']:03d}_{annotation['defect_type']}_サーモ異常{os.path.splitext(src_path)[1]}"
-                    dst_path = os.path.join(self.project_path, "サーモ画像フォルダ", filename)
-                    shutil.copy2(src_path, dst_path)
+                    try:
+                        # 画像を読み込み
+                        thermal_image = Image.open(src_path)
+                        
+                        # アノテーションを描画
+                        annotated_thermal = self._draw_annotation_on_related_image(
+                            thermal_image,
+                            x, y,
+                            annotation_id,
+                            defect_type,
+                            color,
+                            shape,
+                            image_type='thermal'
+                        )
+                        
+                        # ファイル名を生成（命名規則に従う）
+                        ext = os.path.splitext(src_path)[1]
+                        filename = f"ID{annotation_id:03d}_{defect_type}_サーモ異常{ext}"
+                        dst_path = os.path.join(self.project_path, "サーモ画像フォルダ", filename)
+                        
+                        # 保存（JPEG形式の場合はRGB変換）
+                        if ext.lower() in ['.jpg', '.jpeg']:
+                            if annotated_thermal.mode == 'RGBA':
+                                rgb_image = Image.new('RGB', annotated_thermal.size, (255, 255, 255))
+                                rgb_image.paste(annotated_thermal, mask=annotated_thermal.split()[3])
+                                annotated_thermal = rgb_image
+                            elif annotated_thermal.mode != 'RGB':
+                                annotated_thermal = annotated_thermal.convert('RGB')
+                            annotated_thermal.save(dst_path, 'JPEG', quality=95)
+                        else:
+                            annotated_thermal.save(dst_path)
+                            
+                    except Exception as e:
+                        print(f"[WARN] サーモ画像の処理に失敗 (ID{annotation_id}): {e}")
 
-            # 可視画像のコピー
+            # 可視画像の処理
             if annotation.get('visible_image'):
                 src_path = annotation['visible_image']
                 if os.path.exists(src_path):
-                    filename = f"ID{annotation['id']:03d}_{annotation['defect_type']}_可視異常{os.path.splitext(src_path)[1]}"
-                    dst_path = os.path.join(self.project_path, "可視画像フォルダ", filename)
-                    shutil.copy2(src_path, dst_path)
+                    try:
+                        # 画像を読み込み
+                        visible_image = Image.open(src_path)
+                        
+                        # アノテーションを描画
+                        annotated_visible = self._draw_annotation_on_related_image(
+                            visible_image,
+                            x, y,
+                            annotation_id,
+                            defect_type,
+                            color,
+                            shape,
+                            image_type='visible'
+                        )
+                        
+                        # ファイル名を生成（命名規則に従う）
+                        ext = os.path.splitext(src_path)[1]
+                        filename = f"ID{annotation_id:03d}_{defect_type}_可視異常{ext}"
+                        dst_path = os.path.join(self.project_path, "可視画像フォルダ", filename)
+                        
+                        # 保存（JPEG形式の場合はRGB変換）
+                        if ext.lower() in ['.jpg', '.jpeg']:
+                            if annotated_visible.mode == 'RGBA':
+                                rgb_image = Image.new('RGB', annotated_visible.size, (255, 255, 255))
+                                rgb_image.paste(annotated_visible, mask=annotated_visible.split()[3])
+                                annotated_visible = rgb_image
+                            elif annotated_visible.mode != 'RGB':
+                                annotated_visible = annotated_visible.convert('RGB')
+                            annotated_visible.save(dst_path, 'JPEG', quality=95)
+                        else:
+                            annotated_visible.save(dst_path)
+                            
+                    except Exception as e:
+                        print(f"[WARN] 可視画像の処理に失敗 (ID{annotation_id}): {e}")
+    
+    def _draw_annotation_on_related_image(self, image, x, y, annotation_id, defect_type, color, shape, image_type):
+        """
+        サーモ画像・可視画像にアノテーションを描画
+        
+        Args:
+            image: 元画像 (PIL Image)
+            x, y: アノテーション座標
+            annotation_id: アノテーションID
+            defect_type: 不具合タイプ
+            color: 色
+            shape: 形状
+            image_type: 画像タイプ ('thermal' または 'visible')
+        
+        Returns:
+            アノテーション描画済み画像
+        """
+        # 画像をコピー
+        annotated_image = image.copy()
+        draw = ImageDraw.Draw(annotated_image)
+        
+        # スケール倍率を取得
+        if image_type == 'thermal':
+            scale_multiplier = self._get_annotation_scale('thermal')
+        elif image_type == 'visible':
+            scale_multiplier = self._get_annotation_scale('visible')
+        else:
+            scale_multiplier = self._get_annotation_scale('overall')
+        
+        # アノテーションアイコン/シェイプを描画（オフセット適用）
+        icon_height = self.draw_annotation_icon_on_image(
+            annotated_image,
+            draw,
+            x, y,
+            defect_type,
+            color,
+            shape,
+            scale_multiplier,
+            image_type=image_type  # オフセット適用のためimage_typeを指定
+        )
+        
+        # ID番号を描画（オフセット適用）
+        self._draw_id_label_on_image(
+            draw,
+            x, y,
+            annotation_id,
+            color,
+            annotated_image.size,
+            scale_multiplier,
+            icon_height,
+            image_type=image_type  # オフセット適用のためimage_typeを指定
+        )
+        
+        return annotated_image
 
     def save_offset_settings(self):
         """アノテーション位置オフセット設定をJSONファイルに保存"""
