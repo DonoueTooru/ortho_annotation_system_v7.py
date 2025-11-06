@@ -2075,6 +2075,12 @@ class OrthoImageAnnotationSystem:
         self.zoom_var = tk.StringVar(value="100%")
         self._updating_zoom_var = False
 
+        # アノテーション移動機能用の状態変数
+        self.move_mode = False              # 移動モードのON/OFF
+        self.moving_annotation = None       # 現在移動中のアノテーション
+        self.move_start_pos = None          # ドラッグ開始位置（Ctrl+ドラッグ用）
+        self.move_original_pos = None       # 元の位置（キャンセル用）
+
         self.initialize_annotation_icons()
 
         self.setup_ui()
@@ -2113,6 +2119,10 @@ class OrthoImageAnnotationSystem:
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
         self.canvas.bind("<Button-2>", self.start_pan)
         self.canvas.bind("<B2-Motion>", self.do_pan)
+        # Ctrl+ドラッグでアノテーション移動
+        self.canvas.bind("<Control-Button-1>", self.on_ctrl_click)
+        self.canvas.bind("<Control-B1-Motion>", self.on_ctrl_drag)
+        self.canvas.bind("<Control-ButtonRelease-1>", self.on_ctrl_release)
 
         # コントロールパネル
         control_frame = ttk.Frame(main_frame)
@@ -2230,6 +2240,8 @@ class OrthoImageAnnotationSystem:
         self.root.bind("<Control-equal>", lambda e: self.zoom_in())  # Shift無し+でも対応
         self.root.bind("<Control-minus>", lambda e: self.zoom_out())
         self.root.bind("<Control-Key-0>", lambda e: self.set_zoom_factor(1.0))  # 100%にリセット
+        # Escキーでアノテーション移動をキャンセル
+        self.root.bind("<Escape>", self.cancel_move)
 
     def select_webodm_folder(self):
         """WebODMのアセットフォルダを選択し、オルソ画像を自動で読み込む"""
@@ -2476,6 +2488,81 @@ class OrthoImageAnnotationSystem:
 
             # アノテーション描画
             self.draw_annotations()
+            
+            # 移動モードボタンを再配置（最前面に表示）
+            self.create_move_mode_button()
+
+    def create_move_mode_button(self):
+        """移動モードボタンを作成・更新"""
+        if not hasattr(self, 'move_mode_button'):
+            # 初回作成
+            self.move_mode_button = tk.Button(
+                self.canvas,
+                text="↗",
+                command=self.toggle_move_mode,
+                width=3,
+                height=1,
+                relief=tk.RAISED,
+                font=("Arial", 14, "bold"),
+                bg="SystemButtonFace"
+            )
+            self.move_mode_button_window = self.canvas.create_window(
+                10, 10,
+                anchor=tk.NW,
+                window=self.move_mode_button,
+                tags="move_button"
+            )
+        else:
+            # ボタンを最前面に
+            self.canvas.tag_raise("move_button")
+
+    def toggle_move_mode(self):
+        """移動モードのON/OFFを切り替え"""
+        self.move_mode = not self.move_mode
+        
+        if self.move_mode:
+            # 移動モードON
+            self.move_mode_button.config(relief=tk.SUNKEN, bg="#90EE90")
+            self.canvas.config(cursor="hand2")
+            print("[移動モード] ON - アノテーションをクリックして移動できます")
+        else:
+            # 移動モードOFF
+            self.move_mode_button.config(relief=tk.RAISED, bg="SystemButtonFace")
+            self.canvas.config(cursor="")
+            print("[移動モード] OFF")
+            # 選択中のアノテーションをクリア
+            if self.moving_annotation:
+                self.moving_annotation = None
+                self.move_original_pos = None
+                self.draw_annotations()
+
+    def find_nearest_annotation(self, image_x, image_y, threshold=30):
+        """指定座標から最も近いアノテーションを検索
+        
+        Args:
+            image_x: 画像座標X
+            image_y: 画像座標Y
+            threshold: 検索範囲の閾値（ピクセル）
+        
+        Returns:
+            最も近いアノテーション、または None
+        """
+        min_distance = float('inf')
+        nearest_annotation = None
+        
+        for annotation in self.annotations:
+            ann_x = annotation["x"]
+            ann_y = annotation["y"]
+            
+            # ユークリッド距離を計算
+            distance = math.sqrt((image_x - ann_x)**2 + (image_y - ann_y)**2)
+            
+            # 閾値内かつ最小距離を更新
+            if distance < threshold / self.zoom_factor and distance < min_distance:
+                min_distance = distance
+                nearest_annotation = annotation
+        
+        return nearest_annotation
 
     def initialize_annotation_icons(self, reset_warning=True):
         """アノテーションアイコンを初期化し、フォルダから読み込む"""
@@ -2559,9 +2646,16 @@ class OrthoImageAnnotationSystem:
             )
             self._icon_warning_shown = True
 
-    def get_tk_icon(self, defect_type, size):
+    def get_tk_icon(self, defect_type, size, alpha=1.0):
+        """透明度を指定してTkinterアイコンを取得
+        
+        Args:
+            defect_type: 不良分類
+            size: アイコンサイズ
+            alpha: 透明度（0.0～1.0）
+        """
         size = max(16, int(size))
-        key = (defect_type, size)
+        key = (defect_type, size, alpha)
         if key in self.annotation_icon_tk_cache:
             return self.annotation_icon_tk_cache[key]
 
@@ -2572,7 +2666,20 @@ class OrthoImageAnnotationSystem:
         if base_icon.size != (size, size):
             icon_image = base_icon.resize((size, size), Image.Resampling.LANCZOS)
         else:
-            icon_image = base_icon
+            icon_image = base_icon.copy()
+
+        # 透明度適用
+        if alpha < 1.0:
+            # RGBAモードに変換して透明度を適用
+            if icon_image.mode != 'RGBA':
+                icon_image = icon_image.convert('RGBA')
+            # アルファチャンネルを調整
+            data = icon_image.getdata()
+            new_data = []
+            for item in data:
+                # RGBAの各ピクセル
+                new_data.append((item[0], item[1], item[2], int(item[3] * alpha)))
+            icon_image.putdata(new_data)
 
         tk_icon = ImageTk.PhotoImage(icon_image)
         self.annotation_icon_tk_cache[key] = tk_icon
@@ -2639,14 +2746,19 @@ class OrthoImageAnnotationSystem:
             defect_type = annotation.get("defect_type")
             color = self.defect_types.get(defect_type, "#FF0000")
 
+            # 移動中のアノテーションは半透明化
+            is_moving = (self.moving_annotation and 
+                        annotation['id'] == self.moving_annotation['id'])
+            alpha = 0.5 if is_moving else 1.0
+
             icon_size = max(24, int(self.annotation_default_icon_size * self.zoom_factor))
-            tk_icon = self.get_tk_icon(defect_type, icon_size)
+            tk_icon = self.get_tk_icon(defect_type, icon_size, alpha=alpha)
 
             if tk_icon is None:
                 icon_path = self.get_annotation_icon_path(defect_type)
                 if icon_path and os.path.isfile(icon_path):
                     self.initialize_annotation_icons(reset_warning=False)
-                    tk_icon = self.get_tk_icon(defect_type, icon_size)
+                    tk_icon = self.get_tk_icon(defect_type, icon_size, alpha=alpha)
 
             if tk_icon:
                 self.canvas.create_image(
@@ -2658,20 +2770,24 @@ class OrthoImageAnnotationSystem:
                 self.canvas_icon_refs.append(tk_icon)
 
                 label_offset = (tk_icon.height() / 2) + 12 * self.zoom_factor
-                self.draw_id_text(x, y - label_offset, color, annotation['id'])
+                # 移動中はIDテキストも半透明化（stippleで表現）
+                if is_moving:
+                    self.draw_id_text(x, y - label_offset, color, annotation['id'], stipple='gray50')
+                else:
+                    self.draw_id_text(x, y - label_offset, color, annotation['id'])
                 continue
 
             shape = annotation.get("shape", "cross")
 
-            # 形状に応じて描画
+            # 形状に応じて描画（移動中は半透明効果を追加）
             if shape == "cross":
-                self.draw_cross(x, y, color, annotation['id'])
+                self.draw_cross(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
             elif shape == "arrow":
-                self.draw_arrow(x, y, color, annotation['id'])
+                self.draw_arrow(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
             elif shape == "circle":
-                self.draw_circle(x, y, color, annotation['id'])
+                self.draw_circle(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
             elif shape == "rectangle":
-                self.draw_rectangle(x, y, color, annotation['id'])
+                self.draw_rectangle(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
 
     def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape, scale_multiplier=1.0):
         try:
@@ -2715,76 +2831,86 @@ class OrthoImageAnnotationSystem:
         else:
             return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
 
-    def draw_cross(self, x, y, color, annotation_id):
+    def draw_cross(self, x, y, color, annotation_id, stipple=None):
         """十字形状を描画"""
         size = 20 * self.zoom_factor
-        self.canvas.create_line(
-            x, y - size, x, y + size,
-            fill=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.canvas.create_line(
-            x - size, y, x + size, y,
-            fill=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id)
+        line_kwargs = {"fill": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            line_kwargs["stipple"] = stipple
+        self.canvas.create_line(x, y - size, x, y + size, **line_kwargs)
+        self.canvas.create_line(x - size, y, x + size, y, **line_kwargs)
+        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_arrow(self, x, y, color, annotation_id):
+    def draw_arrow(self, x, y, color, annotation_id, stipple=None):
         """矢印形状を描画"""
         size = 20 * self.zoom_factor
         # 矢印の軸
-        self.canvas.create_line(
-            x, y - size, x, y + size,
-            fill=color, width=3, tags=f"annotation_{annotation_id}"
-        )
+        line_kwargs = {"fill": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            line_kwargs["stipple"] = stipple
+        self.canvas.create_line(x, y - size, x, y + size, **line_kwargs)
         # 矢印の先端
+        poly_kwargs = {"fill": color, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            poly_kwargs["stipple"] = stipple
         self.canvas.create_polygon(
             x, y - size,
             x - 8 * self.zoom_factor, y - size + 15 * self.zoom_factor,
             x + 8 * self.zoom_factor, y - size + 15 * self.zoom_factor,
-            fill=color, tags=f"annotation_{annotation_id}"
+            **poly_kwargs
         )
-        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id)
+        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_circle(self, x, y, color, annotation_id):
+    def draw_circle(self, x, y, color, annotation_id, stipple=None):
         """円形状を描画"""
         radius = 25 * self.zoom_factor
-        self.canvas.create_oval(
-            x - radius, y - radius, x + radius, y + radius,
-            outline=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.draw_id_text(x, y - radius - 15 * self.zoom_factor, color, annotation_id)
+        oval_kwargs = {"outline": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            oval_kwargs["stipple"] = stipple
+        self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, **oval_kwargs)
+        self.draw_id_text(x, y - radius - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_rectangle(self, x, y, color, annotation_id):
+    def draw_rectangle(self, x, y, color, annotation_id, stipple=None):
         """四角形状を描画"""
         size = 20 * self.zoom_factor
-        self.canvas.create_rectangle(
-            x - size, y - size, x + size, y + size,
-            outline=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id)
+        rect_kwargs = {"outline": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            rect_kwargs["stipple"] = stipple
+        self.canvas.create_rectangle(x - size, y - size, x + size, y + size, **rect_kwargs)
+        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_id_text(self, x, y, color, annotation_id):
+    def draw_id_text(self, x, y, color, annotation_id, stipple=None):
         """ID番号を描画"""
         text_size = max(10, int(12 * self.zoom_factor))
         
         # 背景付きテキスト表示
-        text_id = self.canvas.create_text(
-            x, y,
-            text=f"ID{annotation_id}",
-            fill="white",
-            font=("Arial", text_size, "bold"),
-            anchor="center",
-            tags=f"annotation_{annotation_id}"
-        )
+        text_kwargs = {
+            "text": f"ID{annotation_id}",
+            "fill": "white",
+            "font": ("Arial", text_size, "bold"),
+            "anchor": "center",
+            "tags": f"annotation_{annotation_id}"
+        }
+        if stipple:
+            text_kwargs["stipple"] = stipple
+        
+        text_id = self.canvas.create_text(x, y, **text_kwargs)
 
         # テキストの背景
         bbox = self.canvas.bbox(text_id)
         if bbox:
+            rect_kwargs = {
+                "fill": color,
+                "outline": color,
+                "tags": f"annotation_{annotation_id}"
+            }
+            if stipple:
+                rect_kwargs["stipple"] = stipple
+            
             self.canvas.create_rectangle(
                 bbox[0] - 2, bbox[1] - 1,
                 bbox[2] + 2, bbox[3] + 1,
-                fill=color, outline=color,
-                tags=f"annotation_{annotation_id}"
+                **rect_kwargs
             )
             # テキストを前面に移動
             self.canvas.tag_raise(text_id)
@@ -3010,6 +3136,13 @@ class OrthoImageAnnotationSystem:
 
             # 画像範囲内かチェック
             if 0 <= image_x <= self.current_image.width and 0 <= image_y <= self.current_image.height:
+                
+                # 移動モード中の処理
+                if self.move_mode:
+                    self.handle_move_mode_click(image_x, image_y)
+                    return
+                
+                # 通常モード: アノテーション追加
                 self.add_annotation(image_x, image_y)
 
     def add_annotation(self, x, y):
@@ -3043,6 +3176,130 @@ class OrthoImageAnnotationSystem:
 
         self.update_table()
         self.draw_annotations()
+
+    def handle_move_mode_click(self, image_x, image_y):
+        """移動モード中のクリック処理"""
+        
+        if self.moving_annotation is None:
+            # 1回目のクリック: アノテーションを選択
+            annotation = self.find_nearest_annotation(image_x, image_y)
+            
+            if annotation:
+                self.moving_annotation = annotation
+                self.move_original_pos = (annotation["x"], annotation["y"])
+                # 半透明化して再描画
+                self.draw_annotations()
+                print(f"[移動モード] アノテーションID {annotation['id']} を選択しました")
+            else:
+                messagebox.showinfo("情報", "アノテーションが見つかりません。", parent=self.root)
+        
+        else:
+            # 2回目のクリック: 選択中のアノテーションを移動
+            old_x, old_y = self.move_original_pos
+            self.moving_annotation["x"] = image_x
+            self.moving_annotation["y"] = image_y
+            
+            # 画像範囲内にクランプ
+            self.moving_annotation["x"] = max(0, min(self.current_image.width, self.moving_annotation["x"]))
+            self.moving_annotation["y"] = max(0, min(self.current_image.height, self.moving_annotation["y"]))
+            
+            # ログ出力
+            print(f"[移動モード] アノテーションID {self.moving_annotation['id']} を移動: "
+                  f"({old_x:.1f}, {old_y:.1f}) → ({self.moving_annotation['x']:.1f}, {self.moving_annotation['y']:.1f})")
+            
+            # テーブル更新
+            self.update_table()
+            
+            # 選択状態をクリア
+            self.moving_annotation = None
+            self.move_original_pos = None
+            
+            # 再描画（通常状態に戻す）
+            self.draw_annotations()
+
+    def on_ctrl_click(self, event):
+        """Ctrl + クリック時の処理（ドラッグ開始）"""
+        if not self.current_image:
+            return
+        
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        image_x = canvas_x / self.zoom_factor
+        image_y = canvas_y / self.zoom_factor
+        
+        # 最も近いアノテーションを検索
+        annotation = self.find_nearest_annotation(image_x, image_y)
+        
+        if annotation:
+            self.moving_annotation = annotation
+            self.move_start_pos = (image_x, image_y)
+            self.move_original_pos = (annotation["x"], annotation["y"])
+            self.canvas.config(cursor="fleur")  # 移動カーソル
+            print(f"[Ctrl+ドラッグ] アノテーションID {annotation['id']} を選択")
+
+    def on_ctrl_drag(self, event):
+        """Ctrl + ドラッグ中の処理（リアルタイム更新）"""
+        if not self.moving_annotation or not self.move_start_pos:
+            return
+        
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        image_x = canvas_x / self.zoom_factor
+        image_y = canvas_y / self.zoom_factor
+        
+        # 移動量を計算
+        dx = image_x - self.move_start_pos[0]
+        dy = image_y - self.move_start_pos[1]
+        
+        # アノテーション位置を更新
+        self.moving_annotation["x"] = self.move_original_pos[0] + dx
+        self.moving_annotation["y"] = self.move_original_pos[1] + dy
+        
+        # 画像範囲内にクランプ
+        self.moving_annotation["x"] = max(0, min(self.current_image.width, self.moving_annotation["x"]))
+        self.moving_annotation["y"] = max(0, min(self.current_image.height, self.moving_annotation["y"]))
+        
+        # 再描画
+        self.draw_annotations()
+
+    def on_ctrl_release(self, event):
+        """Ctrl + ドラッグ終了時の処理（確定）"""
+        if self.moving_annotation:
+            # ログ出力
+            print(f"[Ctrl+ドラッグ] アノテーションID {self.moving_annotation['id']} を移動完了: "
+                  f"({self.move_original_pos[0]:.1f}, {self.move_original_pos[1]:.1f}) → "
+                  f"({self.moving_annotation['x']:.1f}, {self.moving_annotation['y']:.1f})")
+            
+            # テーブルを更新
+            self.update_table()
+            
+            # 状態をリセット
+            self.moving_annotation = None
+            self.move_start_pos = None
+            self.move_original_pos = None
+            self.canvas.config(cursor="hand2" if self.move_mode else "")
+
+    def cancel_move(self, event=None):
+        """移動操作をキャンセル"""
+        if self.moving_annotation and self.move_original_pos:
+            # 元の位置に戻す
+            self.moving_annotation["x"] = self.move_original_pos[0]
+            self.moving_annotation["y"] = self.move_original_pos[1]
+            
+            print(f"[キャンセル] アノテーションID {self.moving_annotation['id']} の移動をキャンセル")
+            
+            # 状態をリセット
+            self.moving_annotation = None
+            self.move_original_pos = None
+            self.move_start_pos = None
+            
+            # カーソルを元に戻す
+            self.canvas.config(cursor="hand2" if self.move_mode else "")
+            
+            # 再描画
+            self.draw_annotations()
 
     def on_canvas_double_click(self, event):
         """ダブルクリックでアノテーション編集"""
