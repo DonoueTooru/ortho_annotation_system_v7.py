@@ -2081,11 +2081,13 @@ class OrthoImageAnnotationSystem:
         self.move_start_pos = None          # ドラッグ開始位置（Ctrl+ドラッグ用）
         self.move_original_pos = None       # 元の位置（キャンセル用）
 
-        # アノテーション位置オフセット設定（サーモ画像・可視画像用）
+        # アノテーション位置オフセット設定（サーモ画像・可視画像・オルソ画像用）
         self.thermal_offset_x = 0           # サーモ画像のX軸オフセット（ピクセル）
         self.thermal_offset_y = 0           # サーモ画像のY軸オフセット（ピクセル）
         self.visible_offset_x = 0           # 可視画像のX軸オフセット（ピクセル）
         self.visible_offset_y = 0           # 可視画像のY軸オフセット（ピクセル）
+        self.ortho_offset_x = 0             # オルソ画像（全体図）のX軸オフセット（ピクセル）
+        self.ortho_offset_y = 0             # オルソ画像（全体図）のY軸オフセット（ピクセル）
 
         self.initialize_annotation_icons()
 
@@ -2723,7 +2725,7 @@ class OrthoImageAnnotationSystem:
             image_size: 画像サイズ (width, height)
             scale_multiplier: スケール倍率
             icon_height: アイコンの高さ
-            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, None=オルソ画像/オフセットなし)
+            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, 'ortho'=オルソ画像全体図, None=オフセットなし)
         """
         # オフセットの適用
         offset_x = 0
@@ -2734,6 +2736,9 @@ class OrthoImageAnnotationSystem:
         elif image_type == 'visible':
             offset_x = self.visible_offset_x
             offset_y = self.visible_offset_y
+        elif image_type == 'ortho':
+            offset_x = self.ortho_offset_x
+            offset_y = self.ortho_offset_y
         
         # オフセット適用後の座標
         adjusted_x = x + offset_x
@@ -2834,7 +2839,7 @@ class OrthoImageAnnotationSystem:
             color: 色
             fallback_shape: フォールバック形状
             scale_multiplier: スケール倍率
-            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, None=オルソ画像/オフセットなし)
+            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, 'ortho'=オルソ画像全体図, None=オフセットなし)
         
         Returns:
             アイコンの高さ
@@ -2855,6 +2860,9 @@ class OrthoImageAnnotationSystem:
         elif image_type == 'visible':
             offset_x = self.visible_offset_x
             offset_y = self.visible_offset_y
+        elif image_type == 'ortho':
+            offset_x = self.ortho_offset_x
+            offset_y = self.ortho_offset_y
         
         # オフセット適用後の座標
         adjusted_x = x + offset_x
@@ -4566,6 +4574,22 @@ class OrthoImageAnnotationSystem:
         visible_y_spinbox.grid(row=7, column=1, sticky="w", padx=(0, 10), pady=5)
         ttk.Label(offset_frame, text="px").grid(row=7, column=2, sticky="w", pady=5)
 
+        # オルソ画像オフセット
+        ttk.Separator(offset_frame, orient="horizontal").grid(row=8, column=0, columnspan=4, sticky="ew", pady=10)
+        ttk.Label(offset_frame, text="オルソ画像（全体図）", font=("", 10, "bold")).grid(row=9, column=0, columnspan=4, sticky="w", pady=(5, 5))
+        
+        ttk.Label(offset_frame, text="X軸オフセット:").grid(row=10, column=0, sticky="e", padx=(10, 5), pady=5)
+        ortho_x_var = tk.IntVar(value=self.ortho_offset_x)
+        ortho_x_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=ortho_x_var, width=10)
+        ortho_x_spinbox.grid(row=10, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=10, column=2, sticky="w", pady=5)
+
+        ttk.Label(offset_frame, text="Y軸オフセット:").grid(row=11, column=0, sticky="e", padx=(10, 5), pady=5)
+        ortho_y_var = tk.IntVar(value=self.ortho_offset_y)
+        ortho_y_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=ortho_y_var, width=10)
+        ortho_y_spinbox.grid(row=11, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=11, column=2, sticky="w", pady=5)
+
         # 適用ボタン
         button_frame = ttk.Frame(scrollable_frame)
         button_frame.pack(fill=tk.X, padx=10, pady=20)
@@ -4580,6 +4604,8 @@ class OrthoImageAnnotationSystem:
             self.thermal_offset_y = thermal_y_var.get()
             self.visible_offset_x = visible_x_var.get()
             self.visible_offset_y = visible_y_var.get()
+            self.ortho_offset_x = ortho_x_var.get()
+            self.ortho_offset_y = ortho_y_var.get()
             
             # オフセット設定を保存
             self.save_offset_settings()
@@ -4665,7 +4691,8 @@ class OrthoImageAnnotationSystem:
                 defect_type,
                 color,
                 shape,
-                overall_scale
+                overall_scale,
+                image_type='ortho'  # オルソ画像全体図用のオフセットを適用
             )
 
             # ID番号を描画
@@ -4678,6 +4705,7 @@ class OrthoImageAnnotationSystem:
                 annotated_image.size,
                 overall_scale,
                 icon_height,
+                image_type='ortho'  # オルソ画像全体図用のオフセットを適用
             )
 
         # 保存
@@ -4779,7 +4807,8 @@ class OrthoImageAnnotationSystem:
                     defect_type,
                     color,
                     shape,
-                    overall_scale
+                    overall_scale,
+                    image_type='ortho'  # オルソ画像全体図用のオフセットを適用
                 )
                 
                 # ID番号を描画
@@ -4792,6 +4821,7 @@ class OrthoImageAnnotationSystem:
                     annotated_image.size,
                     overall_scale,
                     icon_height,
+                    image_type='ortho'  # オルソ画像全体図用のオフセットを適用
                 )
                 
                 # ファイル名を生成: ID{id:03d}_全体図_{不具合名}.jpg
@@ -5180,6 +5210,8 @@ class OrthoImageAnnotationSystem:
                 "thermal_offset_y": self.thermal_offset_y,
                 "visible_offset_x": self.visible_offset_x,
                 "visible_offset_y": self.visible_offset_y,
+                "ortho_offset_x": self.ortho_offset_x,
+                "ortho_offset_y": self.ortho_offset_y,
                 "updated_date": datetime.now().isoformat()
             }
             
@@ -5206,6 +5238,8 @@ class OrthoImageAnnotationSystem:
                 self.thermal_offset_y = data.get('thermal_offset_y', 0)
                 self.visible_offset_x = data.get('visible_offset_x', 0)
                 self.visible_offset_y = data.get('visible_offset_y', 0)
+                self.ortho_offset_x = data.get('ortho_offset_x', 0)
+                self.ortho_offset_y = data.get('ortho_offset_y', 0)
                 
         except Exception as e:
             print(f"オフセット設定の読み込みに失敗しました: {str(e)}")
