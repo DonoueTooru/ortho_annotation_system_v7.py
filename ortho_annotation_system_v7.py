@@ -1172,7 +1172,7 @@ class ThermalVisibleFileDialog:
         self._updating_zoom_var = False
 
         self.layout_config_path = Path.home() / ".ortho_annotation_system_v7" / "layout.json"
-        self.layout_preferences = {"main_ratio": 0.5, "preview_ratio": 1.0}
+        self.layout_preferences = {"main_ratio": 0.5, "preview_ratio": 1.0, "last_page": 1}
         self.load_layout_preferences()
         self.zoom_options = [
             ("50%", 0.5),
@@ -1185,7 +1185,8 @@ class ThermalVisibleFileDialog:
         ]
         self.page_size_options = [10, 50, 500, 400]
         self.page_size = 100
-        self.current_page = 1
+        # 前回保存されたページ番号で初期化（後でload_layout_preferencesから設定される）
+        self.current_page = self.layout_preferences.get("last_page", 1)
 
         if initial_dir:
             try:
@@ -1247,6 +1248,14 @@ class ThermalVisibleFileDialog:
         ttk.Frame(pagination_frame).pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.prev_page_button = ttk.Button(pagination_frame, text="前へ", width=6, command=lambda: self.change_page(-1))
         self.prev_page_button.pack(side=tk.LEFT, padx=(0, 5))
+        # ページ番号指定ボックス
+        ttk.Label(pagination_frame, text="ページ:").pack(side=tk.LEFT, padx=(0, 2))
+        self.page_jump_var = tk.StringVar(value="1")
+        self.page_jump_entry = ttk.Entry(pagination_frame, textvariable=self.page_jump_var, width=6, justify="center")
+        self.page_jump_entry.pack(side=tk.LEFT, padx=(0, 2))
+        self.page_jump_entry.bind("<Return>", lambda e: self.jump_to_page())
+        self.page_jump_button = ttk.Button(pagination_frame, text="移動", width=4, command=self.jump_to_page)
+        self.page_jump_button.pack(side=tk.LEFT, padx=(0, 5))
         self.next_page_button = ttk.Button(pagination_frame, text="次へ", width=6, command=lambda: self.change_page(1))
         self.next_page_button.pack(side=tk.LEFT, padx=(0, 10))
         self.page_info_var = tk.StringVar(value="")
@@ -1486,10 +1495,13 @@ class ThermalVisibleFileDialog:
                 if isinstance(data, dict):
                     main_ratio = data.get("main_ratio")
                     preview_ratio = data.get("preview_ratio")
+                    last_page = data.get("last_page")
                     if isinstance(main_ratio, (int, float)):
                         self.layout_preferences["main_ratio"] = float(main_ratio)
                     if isinstance(preview_ratio, (int, float)):
                         self.layout_preferences["preview_ratio"] = float(preview_ratio)
+                    if isinstance(last_page, int) and last_page >= 1:
+                        self.layout_preferences["last_page"] = int(last_page)
         except Exception:
             pass
 
@@ -1533,6 +1545,12 @@ class ThermalVisibleFileDialog:
                 if isinstance(pos_v, int):
                     self.layout_preferences["preview_ratio"] = max(0.1, min(0.9, pos_v / preview_height))
         except tk.TclError:
+            pass
+        # 現在のページ番号を保存
+        try:
+            if hasattr(self, "current_page") and isinstance(self.current_page, int):
+                self.layout_preferences["last_page"] = self.current_page
+        except Exception:
             pass
         try:
             self.layout_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1596,6 +1614,9 @@ class ThermalVisibleFileDialog:
         total_pages = self.get_total_pages()
         if hasattr(self, "page_size_var") and self.page_size_var.get() != str(self.page_size):
             self.page_size_var.set(str(self.page_size))
+        # ページ番号入力ボックスの値を現在のページ番号に更新
+        if hasattr(self, "page_jump_var") and self.page_jump_var.get() != str(self.current_page):
+            self.page_jump_var.set(str(self.current_page))
         if total_pages == 0:
             page_text = "ページ 0 / 0 (0件)"
         else:
@@ -1621,6 +1642,37 @@ class ThermalVisibleFileDialog:
         if new_page == self.current_page:
             return
         self.current_page = new_page
+        self.selected_file = None
+        self.populate_file_list(rescan=False)
+
+    def jump_to_page(self):
+        """ページ番号指定ボックスからページにジャンプ"""
+        try:
+            target_page = int(self.page_jump_var.get())
+        except (ValueError, TypeError):
+            messagebox.showwarning("入力エラー", "ページ番号は数値で入力してください。", parent=self.window)
+            self.page_jump_var.set(str(self.current_page))
+            return
+        
+        total_pages = self.get_total_pages()
+        if total_pages == 0:
+            messagebox.showwarning("エラー", "表示可能なページがありません。", parent=self.window)
+            self.page_jump_var.set("1")
+            return
+        
+        if target_page < 1 or target_page > total_pages:
+            messagebox.showwarning(
+                "範囲外エラー", 
+                f"ページ番号は 1 ～ {total_pages} の範囲で指定してください。", 
+                parent=self.window
+            )
+            self.page_jump_var.set(str(self.current_page))
+            return
+        
+        if target_page == self.current_page:
+            return
+        
+        self.current_page = target_page
         self.selected_file = None
         self.populate_file_list(rescan=False)
 
