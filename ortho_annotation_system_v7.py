@@ -2081,6 +2081,12 @@ class OrthoImageAnnotationSystem:
         self.move_start_pos = None          # ドラッグ開始位置（Ctrl+ドラッグ用）
         self.move_original_pos = None       # 元の位置（キャンセル用）
 
+        # アノテーション位置オフセット設定（サーモ画像・可視画像用）
+        self.thermal_offset_x = 0           # サーモ画像のX軸オフセット（ピクセル）
+        self.thermal_offset_y = 0           # サーモ画像のY軸オフセット（ピクセル）
+        self.visible_offset_x = 0           # 可視画像のX軸オフセット（ピクセル）
+        self.visible_offset_y = 0           # 可視画像のY軸オフセット（ピクセル）
+
         self.initialize_annotation_icons()
 
         self.setup_ui()
@@ -2139,7 +2145,7 @@ class OrthoImageAnnotationSystem:
         ttk.Button(button_frame, text="画像リセット", command=self.reset_image).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="保存", command=self.save_project).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="中止", command=self.quit_application).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(button_frame, text="色設定", command=self.customize_colors).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="色設定", command=self.customize_settings).pack(side=tk.LEFT, padx=(0, 5))
 
         scale_frame = ttk.Frame(button_frame)
         scale_frame.pack(side=tk.LEFT, padx=(5, 0))
@@ -2705,7 +2711,34 @@ class OrthoImageAnnotationSystem:
                 pass
             return scale
 
-    def _draw_id_label_on_image(self, draw, x, y, annotation_id, color, image_size, scale_multiplier=1.0, icon_height=None):
+    def _draw_id_label_on_image(self, draw, x, y, annotation_id, color, image_size, scale_multiplier=1.0, icon_height=None, image_type=None):
+        """
+        画像上にID番号ラベルを描画
+        
+        Args:
+            draw: ImageDrawオブジェクト
+            x, y: 描画座標
+            annotation_id: アノテーションID
+            color: 色
+            image_size: 画像サイズ (width, height)
+            scale_multiplier: スケール倍率
+            icon_height: アイコンの高さ
+            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, None=オルソ画像/オフセットなし)
+        """
+        # オフセットの適用
+        offset_x = 0
+        offset_y = 0
+        if image_type == 'thermal':
+            offset_x = self.thermal_offset_x
+            offset_y = self.thermal_offset_y
+        elif image_type == 'visible':
+            offset_x = self.visible_offset_x
+            offset_y = self.visible_offset_y
+        
+        # オフセット適用後の座標
+        adjusted_x = x + offset_x
+        adjusted_y = y + offset_y
+        
         img_w, img_h = image_size
         base_font_size = max(12, min(24, int(min(img_w, img_h) / 50))) if img_w and img_h else 12
         font_size = max(8, int(round(base_font_size * scale_multiplier)))
@@ -2721,8 +2754,8 @@ class OrthoImageAnnotationSystem:
         offset = 25 * scale_multiplier
         if icon_height:
             offset = max(offset, (icon_height / 2) + 6 * scale_multiplier)
-        text_x = x + offset
-        text_y = y - offset
+        text_x = adjusted_x + offset
+        text_y = adjusted_y - offset
         if img_w:
             text_x = max(0, min(img_w - 1, text_x))
         if img_h:
@@ -2789,13 +2822,43 @@ class OrthoImageAnnotationSystem:
             elif shape == "rectangle":
                 self.draw_rectangle(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
 
-    def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape, scale_multiplier=1.0):
+    def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape, scale_multiplier=1.0, image_type=None):
+        """
+        画像上にアノテーションアイコンを描画
+        
+        Args:
+            image: 描画対象の画像
+            draw: ImageDrawオブジェクト
+            x, y: 描画座標
+            defect_type: 不具合タイプ
+            color: 色
+            fallback_shape: フォールバック形状
+            scale_multiplier: スケール倍率
+            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, None=オルソ画像/オフセットなし)
+        
+        Returns:
+            アイコンの高さ
+        """
         try:
             scale_multiplier = float(scale_multiplier)
         except (TypeError, ValueError):
             scale_multiplier = 1.0
         if not math.isfinite(scale_multiplier) or scale_multiplier <= 0:
             scale_multiplier = 1.0
+
+        # オフセットの適用
+        offset_x = 0
+        offset_y = 0
+        if image_type == 'thermal':
+            offset_x = self.thermal_offset_x
+            offset_y = self.thermal_offset_y
+        elif image_type == 'visible':
+            offset_x = self.visible_offset_x
+            offset_y = self.visible_offset_y
+        
+        # オフセット適用後の座標
+        adjusted_x = x + offset_x
+        adjusted_y = y + offset_y
 
         base_icon = self.load_annotation_icon(defect_type)
         if base_icon is not None:
@@ -2812,8 +2875,8 @@ class OrthoImageAnnotationSystem:
             )
             icon_image = base_icon.resize(resized_size, Image.Resampling.LANCZOS) if resized_size != base_icon.size else base_icon
 
-            paste_x = int(round(x - icon_image.width / 2))
-            paste_y = int(round(y - icon_image.height / 2))
+            paste_x = int(round(adjusted_x - icon_image.width / 2))
+            paste_y = int(round(adjusted_y - icon_image.height / 2))
             paste_x = max(0, min(image.width - icon_image.width, paste_x))
             paste_y = max(0, min(image.height - icon_image.height, paste_y))
 
@@ -2821,15 +2884,15 @@ class OrthoImageAnnotationSystem:
             return icon_image.height
 
         if fallback_shape == "cross":
-            return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_cross_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         elif fallback_shape == "arrow":
-            return self.draw_arrow_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_arrow_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         elif fallback_shape == "circle":
-            return self.draw_circle_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_circle_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         elif fallback_shape == "rectangle":
-            return self.draw_rectangle_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_rectangle_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         else:
-            return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_cross_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
 
     def draw_cross(self, x, y, color, annotation_id, stipple=None):
         """十字形状を描画"""
@@ -4422,18 +4485,38 @@ class OrthoImageAnnotationSystem:
             self.canvas.delete("all")
             self.update_table()
 
-    def customize_colors(self):
-        """色をカスタマイズ"""
+    def customize_settings(self):
+        """色とアノテーション位置オフセットを設定"""
         dialog = tk.Toplevel(self.root)
-        dialog.title("色設定")
-        dialog.geometry("300x400")
+        dialog.title("色・アノテーション位置設定")
+        dialog.geometry("500x650")
         dialog.transient(self.root)
         dialog.grab_set()
+
+        # スクロール可能なフレームを作成
+        canvas = tk.Canvas(dialog)
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === 色設定セクション ===
+        color_frame = ttk.LabelFrame(scrollable_frame, text="色設定", padding=10)
+        color_frame.pack(fill=tk.X, padx=10, pady=10)
 
         color_vars = {}
 
         for i, (defect_type, color) in enumerate(self.defect_types.items()):
-            ttk.Label(dialog, text=f"{defect_type}:").grid(row=i, column=0, sticky="w", padx=10, pady=5)
+            ttk.Label(color_frame, text=f"{defect_type}:").grid(row=i, column=0, sticky="w", padx=10, pady=5)
 
             color_var = tk.StringVar(value=color)
             color_vars[defect_type] = color_var
@@ -4443,16 +4526,70 @@ class OrthoImageAnnotationSystem:
                 if color:
                     cv.set(color)
 
-            ttk.Button(dialog, text="色選択", command=choose_color).grid(row=i, column=1, padx=10, pady=5)
+            ttk.Button(color_frame, text="色選択", command=choose_color).grid(row=i, column=1, padx=10, pady=5)
 
-        def apply_colors():
+        # === アノテーション位置調整セクション ===
+        offset_frame = ttk.LabelFrame(scrollable_frame, text="アノテーション位置調整 (ピクセル単位)", padding=10)
+        offset_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(offset_frame, text="※ 保存時にサーモ画像・可視画像に描画するアノテーションの位置を調整できます", 
+                  font=("", 9)).grid(row=0, column=0, columnspan=4, pady=(0, 10))
+
+        # サーモ画像オフセット
+        ttk.Label(offset_frame, text="サーモ画像", font=("", 10, "bold")).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 5))
+        
+        ttk.Label(offset_frame, text="X軸オフセット:").grid(row=2, column=0, sticky="e", padx=(10, 5), pady=5)
+        thermal_x_var = tk.IntVar(value=self.thermal_offset_x)
+        thermal_x_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=thermal_x_var, width=10)
+        thermal_x_spinbox.grid(row=2, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=2, column=2, sticky="w", pady=5)
+
+        ttk.Label(offset_frame, text="Y軸オフセット:").grid(row=3, column=0, sticky="e", padx=(10, 5), pady=5)
+        thermal_y_var = tk.IntVar(value=self.thermal_offset_y)
+        thermal_y_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=thermal_y_var, width=10)
+        thermal_y_spinbox.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=3, column=2, sticky="w", pady=5)
+
+        # 可視画像オフセット
+        ttk.Separator(offset_frame, orient="horizontal").grid(row=4, column=0, columnspan=4, sticky="ew", pady=10)
+        ttk.Label(offset_frame, text="可視画像", font=("", 10, "bold")).grid(row=5, column=0, columnspan=4, sticky="w", pady=(5, 5))
+        
+        ttk.Label(offset_frame, text="X軸オフセット:").grid(row=6, column=0, sticky="e", padx=(10, 5), pady=5)
+        visible_x_var = tk.IntVar(value=self.visible_offset_x)
+        visible_x_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=visible_x_var, width=10)
+        visible_x_spinbox.grid(row=6, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=6, column=2, sticky="w", pady=5)
+
+        ttk.Label(offset_frame, text="Y軸オフセット:").grid(row=7, column=0, sticky="e", padx=(10, 5), pady=5)
+        visible_y_var = tk.IntVar(value=self.visible_offset_y)
+        visible_y_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=visible_y_var, width=10)
+        visible_y_spinbox.grid(row=7, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=7, column=2, sticky="w", pady=5)
+
+        # 適用ボタン
+        button_frame = ttk.Frame(scrollable_frame)
+        button_frame.pack(fill=tk.X, padx=10, pady=20)
+
+        def apply_settings():
+            # 色設定を適用
             for defect_type, color_var in color_vars.items():
                 self.defect_types[defect_type] = color_var.get()
+            
+            # オフセット設定を適用
+            self.thermal_offset_x = thermal_x_var.get()
+            self.thermal_offset_y = thermal_y_var.get()
+            self.visible_offset_x = visible_x_var.get()
+            self.visible_offset_y = visible_y_var.get()
+            
+            # オフセット設定を保存
+            self.save_offset_settings()
+            
+            # 表示を更新
             self.draw_annotations()
             dialog.destroy()
+            messagebox.showinfo("設定完了", "色とアノテーション位置の設定を保存しました。")
 
-        ttk.Button(dialog, text="適用", command=apply_colors).grid(row=len(self.defect_types), 
-                                                                  column=0, columnspan=2, pady=20)
+        ttk.Button(button_frame, text="適用して閉じる", command=apply_settings).pack(pady=10)
 
     def save_project(self):
         """プロジェクトを保存"""
@@ -4896,6 +5033,53 @@ class OrthoImageAnnotationSystem:
                     dst_path = os.path.join(self.project_path, "可視画像フォルダ", filename)
                     shutil.copy2(src_path, dst_path)
 
+    def save_offset_settings(self):
+        """アノテーション位置オフセット設定をJSONファイルに保存"""
+        try:
+            # プロジェクトパスが設定されていない場合はスキップ
+            if not self.project_path:
+                return
+            
+            settings_folder = os.path.join(self.project_path, "アノテーション設定フォルダ")
+            os.makedirs(settings_folder, exist_ok=True)
+            
+            settings_file = os.path.join(settings_folder, "offset_settings.json")
+            
+            offset_data = {
+                "thermal_offset_x": self.thermal_offset_x,
+                "thermal_offset_y": self.thermal_offset_y,
+                "visible_offset_x": self.visible_offset_x,
+                "visible_offset_y": self.visible_offset_y,
+                "updated_date": datetime.now().isoformat()
+            }
+            
+            with open(settings_file, 'w', encoding='utf-8') as f:
+                json.dump(offset_data, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            print(f"オフセット設定の保存に失敗しました: {str(e)}")
+
+    def load_offset_settings(self):
+        """アノテーション位置オフセット設定をJSONファイルから読み込み"""
+        try:
+            # プロジェクトパスが設定されていない場合はスキップ
+            if not self.project_path:
+                return
+            
+            settings_file = os.path.join(self.project_path, "アノテーション設定フォルダ", "offset_settings.json")
+            
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                self.thermal_offset_x = data.get('thermal_offset_x', 0)
+                self.thermal_offset_y = data.get('thermal_offset_y', 0)
+                self.visible_offset_x = data.get('visible_offset_x', 0)
+                self.visible_offset_y = data.get('visible_offset_y', 0)
+                
+        except Exception as e:
+            print(f"オフセット設定の読み込みに失敗しました: {str(e)}")
+
     def load_annotations(self):
         """アノテーションを読み込み"""
         try:
@@ -4933,6 +5117,9 @@ class OrthoImageAnnotationSystem:
                     self.next_id = max_id + 1
                 else:
                     self.next_id = 1
+                
+                # オフセット設定を読み込み
+                self.load_offset_settings()
 
                 self.update_table()
                 if self.current_image:
