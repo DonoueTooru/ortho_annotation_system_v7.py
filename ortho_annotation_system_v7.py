@@ -1172,7 +1172,7 @@ class ThermalVisibleFileDialog:
         self._updating_zoom_var = False
 
         self.layout_config_path = Path.home() / ".ortho_annotation_system_v7" / "layout.json"
-        self.layout_preferences = {"main_ratio": 0.5, "preview_ratio": 1.0}
+        self.layout_preferences = {"main_ratio": 0.5, "preview_ratio": 1.0, "last_page": 1}
         self.load_layout_preferences()
         self.zoom_options = [
             ("50%", 0.5),
@@ -1185,7 +1185,8 @@ class ThermalVisibleFileDialog:
         ]
         self.page_size_options = [10, 50, 500, 400]
         self.page_size = 100
-        self.current_page = 1
+        # 前回保存されたページ番号で初期化（後でload_layout_preferencesから設定される）
+        self.current_page = self.layout_preferences.get("last_page", 1)
 
         if initial_dir:
             try:
@@ -1247,6 +1248,14 @@ class ThermalVisibleFileDialog:
         ttk.Frame(pagination_frame).pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.prev_page_button = ttk.Button(pagination_frame, text="前へ", width=6, command=lambda: self.change_page(-1))
         self.prev_page_button.pack(side=tk.LEFT, padx=(0, 5))
+        # ページ番号指定ボックス
+        ttk.Label(pagination_frame, text="ページ:").pack(side=tk.LEFT, padx=(0, 2))
+        self.page_jump_var = tk.StringVar(value="1")
+        self.page_jump_entry = ttk.Entry(pagination_frame, textvariable=self.page_jump_var, width=6, justify="center")
+        self.page_jump_entry.pack(side=tk.LEFT, padx=(0, 2))
+        self.page_jump_entry.bind("<Return>", lambda e: self.jump_to_page())
+        self.page_jump_button = ttk.Button(pagination_frame, text="移動", width=4, command=self.jump_to_page)
+        self.page_jump_button.pack(side=tk.LEFT, padx=(0, 5))
         self.next_page_button = ttk.Button(pagination_frame, text="次へ", width=6, command=lambda: self.change_page(1))
         self.next_page_button.pack(side=tk.LEFT, padx=(0, 10))
         self.page_info_var = tk.StringVar(value="")
@@ -1486,10 +1495,13 @@ class ThermalVisibleFileDialog:
                 if isinstance(data, dict):
                     main_ratio = data.get("main_ratio")
                     preview_ratio = data.get("preview_ratio")
+                    last_page = data.get("last_page")
                     if isinstance(main_ratio, (int, float)):
                         self.layout_preferences["main_ratio"] = float(main_ratio)
                     if isinstance(preview_ratio, (int, float)):
                         self.layout_preferences["preview_ratio"] = float(preview_ratio)
+                    if isinstance(last_page, int) and last_page >= 1:
+                        self.layout_preferences["last_page"] = int(last_page)
         except Exception:
             pass
 
@@ -1533,6 +1545,12 @@ class ThermalVisibleFileDialog:
                 if isinstance(pos_v, int):
                     self.layout_preferences["preview_ratio"] = max(0.1, min(0.9, pos_v / preview_height))
         except tk.TclError:
+            pass
+        # 現在のページ番号を保存
+        try:
+            if hasattr(self, "current_page") and isinstance(self.current_page, int):
+                self.layout_preferences["last_page"] = self.current_page
+        except Exception:
             pass
         try:
             self.layout_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1596,6 +1614,9 @@ class ThermalVisibleFileDialog:
         total_pages = self.get_total_pages()
         if hasattr(self, "page_size_var") and self.page_size_var.get() != str(self.page_size):
             self.page_size_var.set(str(self.page_size))
+        # ページ番号入力ボックスの値を現在のページ番号に更新
+        if hasattr(self, "page_jump_var") and self.page_jump_var.get() != str(self.current_page):
+            self.page_jump_var.set(str(self.current_page))
         if total_pages == 0:
             page_text = "ページ 0 / 0 (0件)"
         else:
@@ -1621,6 +1642,37 @@ class ThermalVisibleFileDialog:
         if new_page == self.current_page:
             return
         self.current_page = new_page
+        self.selected_file = None
+        self.populate_file_list(rescan=False)
+
+    def jump_to_page(self):
+        """ページ番号指定ボックスからページにジャンプ"""
+        try:
+            target_page = int(self.page_jump_var.get())
+        except (ValueError, TypeError):
+            messagebox.showwarning("入力エラー", "ページ番号は数値で入力してください。", parent=self.window)
+            self.page_jump_var.set(str(self.current_page))
+            return
+        
+        total_pages = self.get_total_pages()
+        if total_pages == 0:
+            messagebox.showwarning("エラー", "表示可能なページがありません。", parent=self.window)
+            self.page_jump_var.set("1")
+            return
+        
+        if target_page < 1 or target_page > total_pages:
+            messagebox.showwarning(
+                "範囲外エラー", 
+                f"ページ番号は 1 ～ {total_pages} の範囲で指定してください。", 
+                parent=self.window
+            )
+            self.page_jump_var.set(str(self.current_page))
+            return
+        
+        if target_page == self.current_page:
+            return
+        
+        self.current_page = target_page
         self.selected_file = None
         self.populate_file_list(rescan=False)
 
@@ -2023,6 +2075,18 @@ class OrthoImageAnnotationSystem:
         self.zoom_var = tk.StringVar(value="100%")
         self._updating_zoom_var = False
 
+        # アノテーション移動機能用の状態変数
+        self.move_mode = False              # 移動モードのON/OFF
+        self.moving_annotation = None       # 現在移動中のアノテーション
+        self.move_start_pos = None          # ドラッグ開始位置（Ctrl+ドラッグ用）
+        self.move_original_pos = None       # 元の位置（キャンセル用）
+
+        # アノテーション位置オフセット設定（サーモ画像・可視画像用）
+        self.thermal_offset_x = 0           # サーモ画像のX軸オフセット（ピクセル）
+        self.thermal_offset_y = 0           # サーモ画像のY軸オフセット（ピクセル）
+        self.visible_offset_x = 0           # 可視画像のX軸オフセット（ピクセル）
+        self.visible_offset_y = 0           # 可視画像のY軸オフセット（ピクセル）
+
         self.initialize_annotation_icons()
 
         self.setup_ui()
@@ -2061,6 +2125,10 @@ class OrthoImageAnnotationSystem:
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
         self.canvas.bind("<Button-2>", self.start_pan)
         self.canvas.bind("<B2-Motion>", self.do_pan)
+        # Ctrl+ドラッグでアノテーション移動
+        self.canvas.bind("<Control-Button-1>", self.on_ctrl_click)
+        self.canvas.bind("<Control-B1-Motion>", self.on_ctrl_drag)
+        self.canvas.bind("<Control-ButtonRelease-1>", self.on_ctrl_release)
 
         # コントロールパネル
         control_frame = ttk.Frame(main_frame)
@@ -2077,7 +2145,7 @@ class OrthoImageAnnotationSystem:
         ttk.Button(button_frame, text="画像リセット", command=self.reset_image).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="保存", command=self.save_project).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(button_frame, text="中止", command=self.quit_application).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(button_frame, text="色設定", command=self.customize_colors).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="色設定", command=self.customize_settings).pack(side=tk.LEFT, padx=(0, 5))
 
         scale_frame = ttk.Frame(button_frame)
         scale_frame.pack(side=tk.LEFT, padx=(5, 0))
@@ -2178,6 +2246,8 @@ class OrthoImageAnnotationSystem:
         self.root.bind("<Control-equal>", lambda e: self.zoom_in())  # Shift無し+でも対応
         self.root.bind("<Control-minus>", lambda e: self.zoom_out())
         self.root.bind("<Control-Key-0>", lambda e: self.set_zoom_factor(1.0))  # 100%にリセット
+        # Escキーでアノテーション移動をキャンセル
+        self.root.bind("<Escape>", self.cancel_move)
 
     def select_webodm_folder(self):
         """WebODMのアセットフォルダを選択し、オルソ画像を自動で読み込む"""
@@ -2424,6 +2494,81 @@ class OrthoImageAnnotationSystem:
 
             # アノテーション描画
             self.draw_annotations()
+            
+            # 移動モードボタンを再配置（最前面に表示）
+            self.create_move_mode_button()
+
+    def create_move_mode_button(self):
+        """移動モードボタンを作成・更新"""
+        if not hasattr(self, 'move_mode_button'):
+            # 初回作成
+            self.move_mode_button = tk.Button(
+                self.canvas,
+                text="↗",
+                command=self.toggle_move_mode,
+                width=3,
+                height=1,
+                relief=tk.RAISED,
+                font=("Arial", 14, "bold"),
+                bg="SystemButtonFace"
+            )
+            self.move_mode_button_window = self.canvas.create_window(
+                10, 10,
+                anchor=tk.NW,
+                window=self.move_mode_button,
+                tags="move_button"
+            )
+        else:
+            # ボタンを最前面に
+            self.canvas.tag_raise("move_button")
+
+    def toggle_move_mode(self):
+        """移動モードのON/OFFを切り替え"""
+        self.move_mode = not self.move_mode
+        
+        if self.move_mode:
+            # 移動モードON
+            self.move_mode_button.config(relief=tk.SUNKEN, bg="#90EE90")
+            self.canvas.config(cursor="hand2")
+            print("[移動モード] ON - アノテーションをクリックして移動できます")
+        else:
+            # 移動モードOFF
+            self.move_mode_button.config(relief=tk.RAISED, bg="SystemButtonFace")
+            self.canvas.config(cursor="")
+            print("[移動モード] OFF")
+            # 選択中のアノテーションをクリア
+            if self.moving_annotation:
+                self.moving_annotation = None
+                self.move_original_pos = None
+                self.draw_annotations()
+
+    def find_nearest_annotation(self, image_x, image_y, threshold=30):
+        """指定座標から最も近いアノテーションを検索
+        
+        Args:
+            image_x: 画像座標X
+            image_y: 画像座標Y
+            threshold: 検索範囲の閾値（ピクセル）
+        
+        Returns:
+            最も近いアノテーション、または None
+        """
+        min_distance = float('inf')
+        nearest_annotation = None
+        
+        for annotation in self.annotations:
+            ann_x = annotation["x"]
+            ann_y = annotation["y"]
+            
+            # ユークリッド距離を計算
+            distance = math.sqrt((image_x - ann_x)**2 + (image_y - ann_y)**2)
+            
+            # 閾値内かつ最小距離を更新
+            if distance < threshold / self.zoom_factor and distance < min_distance:
+                min_distance = distance
+                nearest_annotation = annotation
+        
+        return nearest_annotation
 
     def initialize_annotation_icons(self, reset_warning=True):
         """アノテーションアイコンを初期化し、フォルダから読み込む"""
@@ -2507,9 +2652,16 @@ class OrthoImageAnnotationSystem:
             )
             self._icon_warning_shown = True
 
-    def get_tk_icon(self, defect_type, size):
+    def get_tk_icon(self, defect_type, size, alpha=1.0):
+        """透明度を指定してTkinterアイコンを取得
+        
+        Args:
+            defect_type: 不良分類
+            size: アイコンサイズ
+            alpha: 透明度（0.0～1.0）
+        """
         size = max(16, int(size))
-        key = (defect_type, size)
+        key = (defect_type, size, alpha)
         if key in self.annotation_icon_tk_cache:
             return self.annotation_icon_tk_cache[key]
 
@@ -2520,7 +2672,20 @@ class OrthoImageAnnotationSystem:
         if base_icon.size != (size, size):
             icon_image = base_icon.resize((size, size), Image.Resampling.LANCZOS)
         else:
-            icon_image = base_icon
+            icon_image = base_icon.copy()
+
+        # 透明度適用
+        if alpha < 1.0:
+            # RGBAモードに変換して透明度を適用
+            if icon_image.mode != 'RGBA':
+                icon_image = icon_image.convert('RGBA')
+            # アルファチャンネルを調整
+            data = icon_image.getdata()
+            new_data = []
+            for item in data:
+                # RGBAの各ピクセル
+                new_data.append((item[0], item[1], item[2], int(item[3] * alpha)))
+            icon_image.putdata(new_data)
 
         tk_icon = ImageTk.PhotoImage(icon_image)
         self.annotation_icon_tk_cache[key] = tk_icon
@@ -2546,7 +2711,34 @@ class OrthoImageAnnotationSystem:
                 pass
             return scale
 
-    def _draw_id_label_on_image(self, draw, x, y, annotation_id, color, image_size, scale_multiplier=1.0, icon_height=None):
+    def _draw_id_label_on_image(self, draw, x, y, annotation_id, color, image_size, scale_multiplier=1.0, icon_height=None, image_type=None):
+        """
+        画像上にID番号ラベルを描画
+        
+        Args:
+            draw: ImageDrawオブジェクト
+            x, y: 描画座標
+            annotation_id: アノテーションID
+            color: 色
+            image_size: 画像サイズ (width, height)
+            scale_multiplier: スケール倍率
+            icon_height: アイコンの高さ
+            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, None=オルソ画像/オフセットなし)
+        """
+        # オフセットの適用
+        offset_x = 0
+        offset_y = 0
+        if image_type == 'thermal':
+            offset_x = self.thermal_offset_x
+            offset_y = self.thermal_offset_y
+        elif image_type == 'visible':
+            offset_x = self.visible_offset_x
+            offset_y = self.visible_offset_y
+        
+        # オフセット適用後の座標
+        adjusted_x = x + offset_x
+        adjusted_y = y + offset_y
+        
         img_w, img_h = image_size
         base_font_size = max(12, min(24, int(min(img_w, img_h) / 50))) if img_w and img_h else 12
         font_size = max(8, int(round(base_font_size * scale_multiplier)))
@@ -2562,8 +2754,8 @@ class OrthoImageAnnotationSystem:
         offset = 25 * scale_multiplier
         if icon_height:
             offset = max(offset, (icon_height / 2) + 6 * scale_multiplier)
-        text_x = x + offset
-        text_y = y - offset
+        text_x = adjusted_x + offset
+        text_y = adjusted_y - offset
         if img_w:
             text_x = max(0, min(img_w - 1, text_x))
         if img_h:
@@ -2587,14 +2779,19 @@ class OrthoImageAnnotationSystem:
             defect_type = annotation.get("defect_type")
             color = self.defect_types.get(defect_type, "#FF0000")
 
+            # 移動中のアノテーションは半透明化
+            is_moving = (self.moving_annotation and 
+                        annotation['id'] == self.moving_annotation['id'])
+            alpha = 0.5 if is_moving else 1.0
+
             icon_size = max(24, int(self.annotation_default_icon_size * self.zoom_factor))
-            tk_icon = self.get_tk_icon(defect_type, icon_size)
+            tk_icon = self.get_tk_icon(defect_type, icon_size, alpha=alpha)
 
             if tk_icon is None:
                 icon_path = self.get_annotation_icon_path(defect_type)
                 if icon_path and os.path.isfile(icon_path):
                     self.initialize_annotation_icons(reset_warning=False)
-                    tk_icon = self.get_tk_icon(defect_type, icon_size)
+                    tk_icon = self.get_tk_icon(defect_type, icon_size, alpha=alpha)
 
             if tk_icon:
                 self.canvas.create_image(
@@ -2606,28 +2803,62 @@ class OrthoImageAnnotationSystem:
                 self.canvas_icon_refs.append(tk_icon)
 
                 label_offset = (tk_icon.height() / 2) + 12 * self.zoom_factor
-                self.draw_id_text(x, y - label_offset, color, annotation['id'])
+                # 移動中はIDテキストも半透明化（stippleで表現）
+                if is_moving:
+                    self.draw_id_text(x, y - label_offset, color, annotation['id'], stipple='gray50')
+                else:
+                    self.draw_id_text(x, y - label_offset, color, annotation['id'])
                 continue
 
             shape = annotation.get("shape", "cross")
 
-            # 形状に応じて描画
+            # 形状に応じて描画（移動中は半透明効果を追加）
             if shape == "cross":
-                self.draw_cross(x, y, color, annotation['id'])
+                self.draw_cross(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
             elif shape == "arrow":
-                self.draw_arrow(x, y, color, annotation['id'])
+                self.draw_arrow(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
             elif shape == "circle":
-                self.draw_circle(x, y, color, annotation['id'])
+                self.draw_circle(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
             elif shape == "rectangle":
-                self.draw_rectangle(x, y, color, annotation['id'])
+                self.draw_rectangle(x, y, color, annotation['id'], stipple='gray50' if is_moving else None)
 
-    def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape, scale_multiplier=1.0):
+    def draw_annotation_icon_on_image(self, image, draw, x, y, defect_type, color, fallback_shape, scale_multiplier=1.0, image_type=None):
+        """
+        画像上にアノテーションアイコンを描画
+        
+        Args:
+            image: 描画対象の画像
+            draw: ImageDrawオブジェクト
+            x, y: 描画座標
+            defect_type: 不具合タイプ
+            color: 色
+            fallback_shape: フォールバック形状
+            scale_multiplier: スケール倍率
+            image_type: 画像タイプ ('thermal'=サーモ画像, 'visible'=可視画像, None=オルソ画像/オフセットなし)
+        
+        Returns:
+            アイコンの高さ
+        """
         try:
             scale_multiplier = float(scale_multiplier)
         except (TypeError, ValueError):
             scale_multiplier = 1.0
         if not math.isfinite(scale_multiplier) or scale_multiplier <= 0:
             scale_multiplier = 1.0
+
+        # オフセットの適用
+        offset_x = 0
+        offset_y = 0
+        if image_type == 'thermal':
+            offset_x = self.thermal_offset_x
+            offset_y = self.thermal_offset_y
+        elif image_type == 'visible':
+            offset_x = self.visible_offset_x
+            offset_y = self.visible_offset_y
+        
+        # オフセット適用後の座標
+        adjusted_x = x + offset_x
+        adjusted_y = y + offset_y
 
         base_icon = self.load_annotation_icon(defect_type)
         if base_icon is not None:
@@ -2644,8 +2875,8 @@ class OrthoImageAnnotationSystem:
             )
             icon_image = base_icon.resize(resized_size, Image.Resampling.LANCZOS) if resized_size != base_icon.size else base_icon
 
-            paste_x = int(round(x - icon_image.width / 2))
-            paste_y = int(round(y - icon_image.height / 2))
+            paste_x = int(round(adjusted_x - icon_image.width / 2))
+            paste_y = int(round(adjusted_y - icon_image.height / 2))
             paste_x = max(0, min(image.width - icon_image.width, paste_x))
             paste_y = max(0, min(image.height - icon_image.height, paste_y))
 
@@ -2653,86 +2884,96 @@ class OrthoImageAnnotationSystem:
             return icon_image.height
 
         if fallback_shape == "cross":
-            return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_cross_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         elif fallback_shape == "arrow":
-            return self.draw_arrow_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_arrow_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         elif fallback_shape == "circle":
-            return self.draw_circle_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_circle_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         elif fallback_shape == "rectangle":
-            return self.draw_rectangle_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_rectangle_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
         else:
-            return self.draw_cross_on_image(draw, x, y, color, scale_multiplier)
+            return self.draw_cross_on_image(draw, adjusted_x, adjusted_y, color, scale_multiplier)
 
-    def draw_cross(self, x, y, color, annotation_id):
+    def draw_cross(self, x, y, color, annotation_id, stipple=None):
         """十字形状を描画"""
         size = 20 * self.zoom_factor
-        self.canvas.create_line(
-            x, y - size, x, y + size,
-            fill=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.canvas.create_line(
-            x - size, y, x + size, y,
-            fill=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id)
+        line_kwargs = {"fill": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            line_kwargs["stipple"] = stipple
+        self.canvas.create_line(x, y - size, x, y + size, **line_kwargs)
+        self.canvas.create_line(x - size, y, x + size, y, **line_kwargs)
+        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_arrow(self, x, y, color, annotation_id):
+    def draw_arrow(self, x, y, color, annotation_id, stipple=None):
         """矢印形状を描画"""
         size = 20 * self.zoom_factor
         # 矢印の軸
-        self.canvas.create_line(
-            x, y - size, x, y + size,
-            fill=color, width=3, tags=f"annotation_{annotation_id}"
-        )
+        line_kwargs = {"fill": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            line_kwargs["stipple"] = stipple
+        self.canvas.create_line(x, y - size, x, y + size, **line_kwargs)
         # 矢印の先端
+        poly_kwargs = {"fill": color, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            poly_kwargs["stipple"] = stipple
         self.canvas.create_polygon(
             x, y - size,
             x - 8 * self.zoom_factor, y - size + 15 * self.zoom_factor,
             x + 8 * self.zoom_factor, y - size + 15 * self.zoom_factor,
-            fill=color, tags=f"annotation_{annotation_id}"
+            **poly_kwargs
         )
-        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id)
+        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_circle(self, x, y, color, annotation_id):
+    def draw_circle(self, x, y, color, annotation_id, stipple=None):
         """円形状を描画"""
         radius = 25 * self.zoom_factor
-        self.canvas.create_oval(
-            x - radius, y - radius, x + radius, y + radius,
-            outline=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.draw_id_text(x, y - radius - 15 * self.zoom_factor, color, annotation_id)
+        oval_kwargs = {"outline": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            oval_kwargs["stipple"] = stipple
+        self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, **oval_kwargs)
+        self.draw_id_text(x, y - radius - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_rectangle(self, x, y, color, annotation_id):
+    def draw_rectangle(self, x, y, color, annotation_id, stipple=None):
         """四角形状を描画"""
         size = 20 * self.zoom_factor
-        self.canvas.create_rectangle(
-            x - size, y - size, x + size, y + size,
-            outline=color, width=3, tags=f"annotation_{annotation_id}"
-        )
-        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id)
+        rect_kwargs = {"outline": color, "width": 3, "tags": f"annotation_{annotation_id}"}
+        if stipple:
+            rect_kwargs["stipple"] = stipple
+        self.canvas.create_rectangle(x - size, y - size, x + size, y + size, **rect_kwargs)
+        self.draw_id_text(x, y - size - 15 * self.zoom_factor, color, annotation_id, stipple)
 
-    def draw_id_text(self, x, y, color, annotation_id):
+    def draw_id_text(self, x, y, color, annotation_id, stipple=None):
         """ID番号を描画"""
         text_size = max(10, int(12 * self.zoom_factor))
         
         # 背景付きテキスト表示
-        text_id = self.canvas.create_text(
-            x, y,
-            text=f"ID{annotation_id}",
-            fill="white",
-            font=("Arial", text_size, "bold"),
-            anchor="center",
-            tags=f"annotation_{annotation_id}"
-        )
+        text_kwargs = {
+            "text": f"ID{annotation_id}",
+            "fill": "white",
+            "font": ("Arial", text_size, "bold"),
+            "anchor": "center",
+            "tags": f"annotation_{annotation_id}"
+        }
+        if stipple:
+            text_kwargs["stipple"] = stipple
+        
+        text_id = self.canvas.create_text(x, y, **text_kwargs)
 
         # テキストの背景
         bbox = self.canvas.bbox(text_id)
         if bbox:
+            rect_kwargs = {
+                "fill": color,
+                "outline": color,
+                "tags": f"annotation_{annotation_id}"
+            }
+            if stipple:
+                rect_kwargs["stipple"] = stipple
+            
             self.canvas.create_rectangle(
                 bbox[0] - 2, bbox[1] - 1,
                 bbox[2] + 2, bbox[3] + 1,
-                fill=color, outline=color,
-                tags=f"annotation_{annotation_id}"
+                **rect_kwargs
             )
             # テキストを前面に移動
             self.canvas.tag_raise(text_id)
@@ -2958,6 +3199,13 @@ class OrthoImageAnnotationSystem:
 
             # 画像範囲内かチェック
             if 0 <= image_x <= self.current_image.width and 0 <= image_y <= self.current_image.height:
+                
+                # 移動モード中の処理
+                if self.move_mode:
+                    self.handle_move_mode_click(image_x, image_y)
+                    return
+                
+                # 通常モード: アノテーション追加
                 self.add_annotation(image_x, image_y)
 
     def add_annotation(self, x, y):
@@ -2991,6 +3239,130 @@ class OrthoImageAnnotationSystem:
 
         self.update_table()
         self.draw_annotations()
+
+    def handle_move_mode_click(self, image_x, image_y):
+        """移動モード中のクリック処理"""
+        
+        if self.moving_annotation is None:
+            # 1回目のクリック: アノテーションを選択
+            annotation = self.find_nearest_annotation(image_x, image_y)
+            
+            if annotation:
+                self.moving_annotation = annotation
+                self.move_original_pos = (annotation["x"], annotation["y"])
+                # 半透明化して再描画
+                self.draw_annotations()
+                print(f"[移動モード] アノテーションID {annotation['id']} を選択しました")
+            else:
+                messagebox.showinfo("情報", "アノテーションが見つかりません。", parent=self.root)
+        
+        else:
+            # 2回目のクリック: 選択中のアノテーションを移動
+            old_x, old_y = self.move_original_pos
+            self.moving_annotation["x"] = image_x
+            self.moving_annotation["y"] = image_y
+            
+            # 画像範囲内にクランプ
+            self.moving_annotation["x"] = max(0, min(self.current_image.width, self.moving_annotation["x"]))
+            self.moving_annotation["y"] = max(0, min(self.current_image.height, self.moving_annotation["y"]))
+            
+            # ログ出力
+            print(f"[移動モード] アノテーションID {self.moving_annotation['id']} を移動: "
+                  f"({old_x:.1f}, {old_y:.1f}) → ({self.moving_annotation['x']:.1f}, {self.moving_annotation['y']:.1f})")
+            
+            # テーブル更新
+            self.update_table()
+            
+            # 選択状態をクリア
+            self.moving_annotation = None
+            self.move_original_pos = None
+            
+            # 再描画（通常状態に戻す）
+            self.draw_annotations()
+
+    def on_ctrl_click(self, event):
+        """Ctrl + クリック時の処理（ドラッグ開始）"""
+        if not self.current_image:
+            return
+        
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        image_x = canvas_x / self.zoom_factor
+        image_y = canvas_y / self.zoom_factor
+        
+        # 最も近いアノテーションを検索
+        annotation = self.find_nearest_annotation(image_x, image_y)
+        
+        if annotation:
+            self.moving_annotation = annotation
+            self.move_start_pos = (image_x, image_y)
+            self.move_original_pos = (annotation["x"], annotation["y"])
+            self.canvas.config(cursor="fleur")  # 移動カーソル
+            print(f"[Ctrl+ドラッグ] アノテーションID {annotation['id']} を選択")
+
+    def on_ctrl_drag(self, event):
+        """Ctrl + ドラッグ中の処理（リアルタイム更新）"""
+        if not self.moving_annotation or not self.move_start_pos:
+            return
+        
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        image_x = canvas_x / self.zoom_factor
+        image_y = canvas_y / self.zoom_factor
+        
+        # 移動量を計算
+        dx = image_x - self.move_start_pos[0]
+        dy = image_y - self.move_start_pos[1]
+        
+        # アノテーション位置を更新
+        self.moving_annotation["x"] = self.move_original_pos[0] + dx
+        self.moving_annotation["y"] = self.move_original_pos[1] + dy
+        
+        # 画像範囲内にクランプ
+        self.moving_annotation["x"] = max(0, min(self.current_image.width, self.moving_annotation["x"]))
+        self.moving_annotation["y"] = max(0, min(self.current_image.height, self.moving_annotation["y"]))
+        
+        # 再描画
+        self.draw_annotations()
+
+    def on_ctrl_release(self, event):
+        """Ctrl + ドラッグ終了時の処理（確定）"""
+        if self.moving_annotation:
+            # ログ出力
+            print(f"[Ctrl+ドラッグ] アノテーションID {self.moving_annotation['id']} を移動完了: "
+                  f"({self.move_original_pos[0]:.1f}, {self.move_original_pos[1]:.1f}) → "
+                  f"({self.moving_annotation['x']:.1f}, {self.moving_annotation['y']:.1f})")
+            
+            # テーブルを更新
+            self.update_table()
+            
+            # 状態をリセット
+            self.moving_annotation = None
+            self.move_start_pos = None
+            self.move_original_pos = None
+            self.canvas.config(cursor="hand2" if self.move_mode else "")
+
+    def cancel_move(self, event=None):
+        """移動操作をキャンセル"""
+        if self.moving_annotation and self.move_original_pos:
+            # 元の位置に戻す
+            self.moving_annotation["x"] = self.move_original_pos[0]
+            self.moving_annotation["y"] = self.move_original_pos[1]
+            
+            print(f"[キャンセル] アノテーションID {self.moving_annotation['id']} の移動をキャンセル")
+            
+            # 状態をリセット
+            self.moving_annotation = None
+            self.move_original_pos = None
+            self.move_start_pos = None
+            
+            # カーソルを元に戻す
+            self.canvas.config(cursor="hand2" if self.move_mode else "")
+            
+            # 再描画
+            self.draw_annotations()
 
     def on_canvas_double_click(self, event):
         """ダブルクリックでアノテーション編集"""
@@ -4113,18 +4485,38 @@ class OrthoImageAnnotationSystem:
             self.canvas.delete("all")
             self.update_table()
 
-    def customize_colors(self):
-        """色をカスタマイズ"""
+    def customize_settings(self):
+        """色とアノテーション位置オフセットを設定"""
         dialog = tk.Toplevel(self.root)
-        dialog.title("色設定")
-        dialog.geometry("300x400")
+        dialog.title("色・アノテーション位置設定")
+        dialog.geometry("500x650")
         dialog.transient(self.root)
         dialog.grab_set()
+
+        # スクロール可能なフレームを作成
+        canvas = tk.Canvas(dialog)
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === 色設定セクション ===
+        color_frame = ttk.LabelFrame(scrollable_frame, text="色設定", padding=10)
+        color_frame.pack(fill=tk.X, padx=10, pady=10)
 
         color_vars = {}
 
         for i, (defect_type, color) in enumerate(self.defect_types.items()):
-            ttk.Label(dialog, text=f"{defect_type}:").grid(row=i, column=0, sticky="w", padx=10, pady=5)
+            ttk.Label(color_frame, text=f"{defect_type}:").grid(row=i, column=0, sticky="w", padx=10, pady=5)
 
             color_var = tk.StringVar(value=color)
             color_vars[defect_type] = color_var
@@ -4134,16 +4526,70 @@ class OrthoImageAnnotationSystem:
                 if color:
                     cv.set(color)
 
-            ttk.Button(dialog, text="色選択", command=choose_color).grid(row=i, column=1, padx=10, pady=5)
+            ttk.Button(color_frame, text="色選択", command=choose_color).grid(row=i, column=1, padx=10, pady=5)
 
-        def apply_colors():
+        # === アノテーション位置調整セクション ===
+        offset_frame = ttk.LabelFrame(scrollable_frame, text="アノテーション位置調整 (ピクセル単位)", padding=10)
+        offset_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(offset_frame, text="※ 保存時にサーモ画像・可視画像に描画するアノテーションの位置を調整できます", 
+                  font=("", 9)).grid(row=0, column=0, columnspan=4, pady=(0, 10))
+
+        # サーモ画像オフセット
+        ttk.Label(offset_frame, text="サーモ画像", font=("", 10, "bold")).grid(row=1, column=0, columnspan=4, sticky="w", pady=(5, 5))
+        
+        ttk.Label(offset_frame, text="X軸オフセット:").grid(row=2, column=0, sticky="e", padx=(10, 5), pady=5)
+        thermal_x_var = tk.IntVar(value=self.thermal_offset_x)
+        thermal_x_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=thermal_x_var, width=10)
+        thermal_x_spinbox.grid(row=2, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=2, column=2, sticky="w", pady=5)
+
+        ttk.Label(offset_frame, text="Y軸オフセット:").grid(row=3, column=0, sticky="e", padx=(10, 5), pady=5)
+        thermal_y_var = tk.IntVar(value=self.thermal_offset_y)
+        thermal_y_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=thermal_y_var, width=10)
+        thermal_y_spinbox.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=3, column=2, sticky="w", pady=5)
+
+        # 可視画像オフセット
+        ttk.Separator(offset_frame, orient="horizontal").grid(row=4, column=0, columnspan=4, sticky="ew", pady=10)
+        ttk.Label(offset_frame, text="可視画像", font=("", 10, "bold")).grid(row=5, column=0, columnspan=4, sticky="w", pady=(5, 5))
+        
+        ttk.Label(offset_frame, text="X軸オフセット:").grid(row=6, column=0, sticky="e", padx=(10, 5), pady=5)
+        visible_x_var = tk.IntVar(value=self.visible_offset_x)
+        visible_x_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=visible_x_var, width=10)
+        visible_x_spinbox.grid(row=6, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=6, column=2, sticky="w", pady=5)
+
+        ttk.Label(offset_frame, text="Y軸オフセット:").grid(row=7, column=0, sticky="e", padx=(10, 5), pady=5)
+        visible_y_var = tk.IntVar(value=self.visible_offset_y)
+        visible_y_spinbox = ttk.Spinbox(offset_frame, from_=-1000, to=1000, textvariable=visible_y_var, width=10)
+        visible_y_spinbox.grid(row=7, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Label(offset_frame, text="px").grid(row=7, column=2, sticky="w", pady=5)
+
+        # 適用ボタン
+        button_frame = ttk.Frame(scrollable_frame)
+        button_frame.pack(fill=tk.X, padx=10, pady=20)
+
+        def apply_settings():
+            # 色設定を適用
             for defect_type, color_var in color_vars.items():
                 self.defect_types[defect_type] = color_var.get()
+            
+            # オフセット設定を適用
+            self.thermal_offset_x = thermal_x_var.get()
+            self.thermal_offset_y = thermal_y_var.get()
+            self.visible_offset_x = visible_x_var.get()
+            self.visible_offset_y = visible_y_var.get()
+            
+            # オフセット設定を保存
+            self.save_offset_settings()
+            
+            # 表示を更新
             self.draw_annotations()
             dialog.destroy()
+            messagebox.showinfo("設定完了", "色とアノテーション位置の設定を保存しました。")
 
-        ttk.Button(dialog, text="適用", command=apply_colors).grid(row=len(self.defect_types), 
-                                                                  column=0, columnspan=2, pady=20)
+        ttk.Button(button_frame, text="適用して閉じる", command=apply_settings).pack(pady=10)
 
     def save_project(self):
         """プロジェクトを保存"""
@@ -4587,6 +5033,53 @@ class OrthoImageAnnotationSystem:
                     dst_path = os.path.join(self.project_path, "可視画像フォルダ", filename)
                     shutil.copy2(src_path, dst_path)
 
+    def save_offset_settings(self):
+        """アノテーション位置オフセット設定をJSONファイルに保存"""
+        try:
+            # プロジェクトパスが設定されていない場合はスキップ
+            if not self.project_path:
+                return
+            
+            settings_folder = os.path.join(self.project_path, "アノテーション設定フォルダ")
+            os.makedirs(settings_folder, exist_ok=True)
+            
+            settings_file = os.path.join(settings_folder, "offset_settings.json")
+            
+            offset_data = {
+                "thermal_offset_x": self.thermal_offset_x,
+                "thermal_offset_y": self.thermal_offset_y,
+                "visible_offset_x": self.visible_offset_x,
+                "visible_offset_y": self.visible_offset_y,
+                "updated_date": datetime.now().isoformat()
+            }
+            
+            with open(settings_file, 'w', encoding='utf-8') as f:
+                json.dump(offset_data, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            print(f"オフセット設定の保存に失敗しました: {str(e)}")
+
+    def load_offset_settings(self):
+        """アノテーション位置オフセット設定をJSONファイルから読み込み"""
+        try:
+            # プロジェクトパスが設定されていない場合はスキップ
+            if not self.project_path:
+                return
+            
+            settings_file = os.path.join(self.project_path, "アノテーション設定フォルダ", "offset_settings.json")
+            
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                self.thermal_offset_x = data.get('thermal_offset_x', 0)
+                self.thermal_offset_y = data.get('thermal_offset_y', 0)
+                self.visible_offset_x = data.get('visible_offset_x', 0)
+                self.visible_offset_y = data.get('visible_offset_y', 0)
+                
+        except Exception as e:
+            print(f"オフセット設定の読み込みに失敗しました: {str(e)}")
+
     def load_annotations(self):
         """アノテーションを読み込み"""
         try:
@@ -4624,6 +5117,9 @@ class OrthoImageAnnotationSystem:
                     self.next_id = max_id + 1
                 else:
                     self.next_id = 1
+                
+                # オフセット設定を読み込み
+                self.load_offset_settings()
 
                 self.update_table()
                 if self.current_image:
