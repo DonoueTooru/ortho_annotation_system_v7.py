@@ -2089,6 +2089,11 @@ class OrthoImageAnnotationSystem:
         self.ortho_offset_x = 0             # オルソ画像（全体図）のX軸オフセット（ピクセル）
         self.ortho_offset_y = 0             # オルソ画像（全体図）のY軸オフセット（ピクセル）
 
+        # 差分保存機能（Requirement 5）
+        self.last_saved_snapshot = None     # 前回保存時のスナップショット
+        self.has_unsaved_changes = False    # 未保存の変更フラグ
+        self.changed_annotation_ids = set() # 変更されたアノテーションID
+
         self.initialize_annotation_icons()
 
         self.setup_ui()
@@ -3244,6 +3249,10 @@ class OrthoImageAnnotationSystem:
 
         self.annotations.append(annotation)
         self.next_id += 1
+        
+        # 変更追跡
+        self.has_unsaved_changes = True
+        self.changed_annotation_ids.add(annotation['id'])
 
         self.update_table()
         self.draw_annotations()
@@ -3280,6 +3289,10 @@ class OrthoImageAnnotationSystem:
             
             # テーブル更新
             self.update_table()
+            
+            # 変更追跡
+            self.has_unsaved_changes = True
+            self.changed_annotation_ids.add(self.moving_annotation['id'])
             
             # 選択状態をクリア
             self.moving_annotation = None
@@ -3345,6 +3358,10 @@ class OrthoImageAnnotationSystem:
             
             # テーブルを更新
             self.update_table()
+            
+            # 変更追跡
+            self.has_unsaved_changes = True
+            self.changed_annotation_ids.add(self.moving_annotation['id'])
             
             # 状態をリセット
             self.moving_annotation = None
@@ -3419,6 +3436,10 @@ class OrthoImageAnnotationSystem:
         """指定されたIDのアノテーションを削除し、ID番号を振り直し"""
         # キャンバスからアノテーション画像を削除
         self.canvas.delete(f"annotation_{annotation_id}")
+        
+        # 変更追跡（削除前に記録）
+        self.has_unsaved_changes = True
+        self.changed_annotation_ids.add(annotation_id)
         
         # アノテーションを削除
         self.annotations = [ann for ann in self.annotations if ann['id'] != annotation_id]
@@ -3690,6 +3711,9 @@ class OrthoImageAnnotationSystem:
 
         annotation.setdefault("thermal_overlays", [])
         annotation.setdefault("visible_overlays", [])
+        
+        # 編集前のスナップショットを保存（変更追跡用）
+        original_annotation = copy.deepcopy(annotation)
 
         main_frame = ttk.Frame(dialog)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -4251,6 +4275,12 @@ class OrthoImageAnnotationSystem:
             annotation["defect_type"] = defect_combo.get() or annotation.get("defect_type", "")
             annotation["shape"] = self.annotation_shapes.get(shape_combo.get(), annotation.get("shape", "cross"))
             annotation["management_level"] = (mgmt_var.get() or 'S')
+            
+            # 変更追跡：編集前と比較
+            change_type = self._annotation_changed(original_annotation, annotation)
+            if change_type:
+                self.has_unsaved_changes = True
+                self.changed_annotation_ids.add(annotation['id'])
 
             self.update_table()
             self.draw_annotations()
@@ -4599,6 +4629,16 @@ class OrthoImageAnnotationSystem:
             for defect_type, color_var in color_vars.items():
                 self.defect_types[defect_type] = color_var.get()
             
+            # オフセット変更チェック（変更前の値を保存）
+            offset_changed = (
+                self.thermal_offset_x != thermal_x_var.get() or
+                self.thermal_offset_y != thermal_y_var.get() or
+                self.visible_offset_x != visible_x_var.get() or
+                self.visible_offset_y != visible_y_var.get() or
+                self.ortho_offset_x != ortho_x_var.get() or
+                self.ortho_offset_y != ortho_y_var.get()
+            )
+            
             # オフセット設定を適用
             self.thermal_offset_x = thermal_x_var.get()
             self.thermal_offset_y = thermal_y_var.get()
@@ -4610,6 +4650,11 @@ class OrthoImageAnnotationSystem:
             # オフセット設定を保存
             self.save_offset_settings()
             
+            # 変更追跡：オフセット変更時は全アノテーションが変更対象
+            if offset_changed:
+                self.has_unsaved_changes = True
+                self.changed_annotation_ids = set(a['id'] for a in self.annotations)
+            
             # 表示を更新
             self.draw_annotations()
             dialog.destroy()
@@ -4618,13 +4663,32 @@ class OrthoImageAnnotationSystem:
         ttk.Button(button_frame, text="適用して閉じる", command=apply_settings).pack(pady=10)
 
     def save_project(self):
-        """プロジェクトを保存"""
+        """プロジェクトを差分保存"""
         if not self.annotations:
             messagebox.showwarning("警告", "保存するアノテーションがありません。")
             return
 
         try:
-            # アノテーション設定を保存
+            # 変更を検出
+            changes = self.detect_changes()
+            
+            # テキストのみ変更の場合、画像生成の確認
+            generate_images = True
+            if changes['has_text_only_changes'] and not changes['has_visual_changes']:
+                result = messagebox.askyesnocancel(
+                    "画像生成の確認",
+                    "画像に影響しない変更（テキスト情報のみ）が検出されました。\n\n"
+                    "画像を再生成しますか？\n\n"
+                    "・はい: 画像を再生成する\n"
+                    "・いいえ: 一覧表のみ更新する（推奨）\n"
+                    "・キャンセル: 保存を中止する",
+                    default=messagebox.NO
+                )
+                if result is None:  # キャンセル
+                    return
+                generate_images = result
+            
+            # アノテーション設定を保存（常に実行）
             annotation_data = {
                 "project_name": self.project_name,
                 "image_path": self.image_path,
@@ -4638,29 +4702,44 @@ class OrthoImageAnnotationSystem:
             with open(annotation_file, 'w', encoding='utf-8') as f:
                 json.dump(annotation_data, f, ensure_ascii=False, indent=2)
 
-            # 不具合一覧表をCSV形式で保存
+            # CSV/Excel出力（常に実行）
             self.export_to_csv()
-
-            # 不具合一覧表をExcel形式で保存
             self.export_to_excel()
-
-            # 関連画像をコピー
-            self.copy_related_images()
-
-            # アノテーション入り画像を保存
-            self.save_annotated_image()
-
-            # 各不具合IDごとの個別全体図を保存
-            self.save_individual_annotated_images()
-
-            # 拡張版（v2）CSV/XLSXの出力（メイン保存と同一タイミング）
             try:
                 self.export_v2_csv()
                 self.export_v2_xlsx()
             except Exception as e:
                 print(f"[WARN] v2出力でエラー: {e}")
-
-            messagebox.showinfo("成功", f"プロジェクト '{self.project_name}' を保存しました。")
+            
+            # 画像生成処理（変更がある場合のみ、またはユーザーが選択した場合）
+            if generate_images:
+                # 削除されたアノテーションの画像を削除
+                if changes['deleted_ids']:
+                    self.delete_related_images(changes['deleted_ids'])
+                
+                # 変更・追加されたアノテーションの関連画像を生成
+                if changes['changed_ids'] or changes['added_ids']:
+                    target_ids = changes['changed_ids'] | changes['added_ids']
+                    self.copy_related_images_incremental(target_ids)
+                
+                # 全体図の再生成（必要な場合のみ）
+                if changes['need_full_redraw']:
+                    self.save_annotated_image()
+                
+                # 個別全体図の再生成（変更されたIDのみ）
+                if changes['need_individual_redraw']:
+                    self.save_individual_annotated_images_incremental(
+                        changes['need_individual_redraw']
+                    )
+            
+            # スナップショットを更新
+            self.update_snapshot()
+            self.has_unsaved_changes = False
+            self.changed_annotation_ids.clear()
+            
+            # 成功メッセージ
+            message = self._create_save_message(changes, generate_images)
+            messagebox.showinfo("成功", message)
 
         except Exception as e:
             messagebox.showerror("エラー", f"保存に失敗しました: {str(e)}")
@@ -5310,17 +5389,428 @@ class OrthoImageAnnotationSystem:
                 self.update_table()
                 if self.current_image:
                     self.draw_annotations()
+                
+                # 差分保存: 読み込み後にスナップショットを初期化
+                self.update_snapshot()
+                self.has_unsaved_changes = False
+                self.changed_annotation_ids.clear()
 
         except Exception as e:
             messagebox.showerror("エラー", f"アノテーションの読み込みに失敗しました: {str(e)}")
 
+    # ============================================================
+    # 差分保存機能（Requirement 5）
+    # ============================================================
+
+    def create_snapshot(self):
+        """
+        現在の状態のスナップショットを作成
+        
+        Returns:
+            dict: スナップショットデータ
+        """
+        return {
+            'annotations': copy.deepcopy(self.annotations),
+            'offsets': {
+                'thermal_x': self.thermal_offset_x,
+                'thermal_y': self.thermal_offset_y,
+                'visible_x': self.visible_offset_x,
+                'visible_y': self.visible_offset_y,
+                'ortho_x': self.ortho_offset_x,
+                'ortho_y': self.ortho_offset_y,
+            },
+            'colors': copy.deepcopy(self.defect_types),
+        }
+
+    def update_snapshot(self):
+        """スナップショットを最新状態に更新"""
+        self.last_saved_snapshot = self.create_snapshot()
+
+    def detect_changes(self):
+        """
+        変更されたアノテーションを検出
+        
+        Returns:
+            dict: {
+                'changed_ids': set,              # 変更されたアノテーションID
+                'deleted_ids': set,              # 削除されたアノテーションID
+                'added_ids': set,                # 新規追加されたアノテーションID
+                'need_full_redraw': bool,        # 全体図の再描画が必要か
+                'need_individual_redraw': set,   # 個別全体図の再描画が必要なID
+                'has_visual_changes': bool,      # 画像に影響する変更があるか
+                'has_text_only_changes': bool,   # テキストのみの変更があるか
+            }
+        """
+        if not self.last_saved_snapshot:
+            # 初回保存時は全て変更扱い
+            all_ids = set(a['id'] for a in self.annotations)
+            return {
+                'changed_ids': all_ids,
+                'deleted_ids': set(),
+                'added_ids': all_ids,
+                'need_full_redraw': True,
+                'need_individual_redraw': all_ids,
+                'has_visual_changes': True,
+                'has_text_only_changes': False,
+            }
+        
+        current = {a['id']: a for a in self.annotations}
+        previous = {a['id']: a for a in self.last_saved_snapshot['annotations']}
+        
+        current_ids = set(current.keys())
+        previous_ids = set(previous.keys())
+        
+        added_ids = current_ids - previous_ids
+        deleted_ids = previous_ids - current_ids
+        potential_changed = current_ids & previous_ids
+        
+        visual_changed_ids = set()      # 画像に影響する変更
+        text_only_changed_ids = set()   # テキストのみの変更
+        
+        for aid in potential_changed:
+            change_type = self._annotation_changed(previous[aid], current[aid])
+            if change_type == 'visual':
+                visual_changed_ids.add(aid)
+            elif change_type == 'text':
+                text_only_changed_ids.add(aid)
+        
+        # オフセット・色の変更チェック
+        offset_changed = self._offset_changed()
+        color_changed = self._color_changed()
+        
+        # 画像に影響する変更があるか
+        has_visual_changes = bool(visual_changed_ids or added_ids or deleted_ids or 
+                                  offset_changed or color_changed)
+        
+        # テキストのみの変更があるか
+        has_text_only_changes = bool(text_only_changed_ids) and not has_visual_changes
+        
+        # 全体図の再描画が必要か
+        need_full_redraw = has_visual_changes
+        
+        # 個別全体図の再描画が必要なID
+        need_individual_redraw = visual_changed_ids | added_ids
+        
+        return {
+            'changed_ids': visual_changed_ids,
+            'deleted_ids': deleted_ids,
+            'added_ids': added_ids,
+            'need_full_redraw': need_full_redraw,
+            'need_individual_redraw': need_individual_redraw,
+            'has_visual_changes': has_visual_changes,
+            'has_text_only_changes': has_text_only_changes,
+            'text_only_changed_ids': text_only_changed_ids,
+        }
+
+    def _annotation_changed(self, old, new):
+        """
+        アノテーションが変更されたか判定
+        
+        Args:
+            old: 前回のアノテーションデータ
+            new: 現在のアノテーションデータ
+        
+        Returns:
+            str: 'visual' (画像に影響), 'text' (テキストのみ), None (変更なし)
+        """
+        # 画像に影響する変更を検出
+        visual_keys = ['x', 'y', 'defect_type', 'shape', 
+                       'thermal_image', 'visible_image', 
+                       'thermal_overlays', 'visible_overlays']
+        
+        for key in visual_keys:
+            if old.get(key) != new.get(key):
+                return 'visual'
+        
+        # テキストのみの変更を検出
+        text_keys = ['area_no', 'pcs_no', 'junction_box_no', 'circuit_no', 
+                     'array_no', 'module_position', 'serial_no', 'remarks', 
+                     'report_date', 'management_level']
+        
+        for key in text_keys:
+            if old.get(key) != new.get(key):
+                return 'text'
+        
+        return None
+
+    def _offset_changed(self):
+        """オフセット設定が変更されたか判定"""
+        if not self.last_saved_snapshot:
+            return False
+        
+        prev_offsets = self.last_saved_snapshot['offsets']
+        return (
+            self.thermal_offset_x != prev_offsets['thermal_x'] or
+            self.thermal_offset_y != prev_offsets['thermal_y'] or
+            self.visible_offset_x != prev_offsets['visible_x'] or
+            self.visible_offset_y != prev_offsets['visible_y'] or
+            self.ortho_offset_x != prev_offsets['ortho_x'] or
+            self.ortho_offset_y != prev_offsets['ortho_y']
+        )
+
+    def _color_changed(self):
+        """色設定が変更されたか判定"""
+        if not self.last_saved_snapshot:
+            return False
+        
+        prev_colors = self.last_saved_snapshot['colors']
+        return self.defect_types != prev_colors
+
+    def copy_related_images_incremental(self, target_ids):
+        """
+        指定されたIDのアノテーションのみ関連画像を生成（差分保存）
+        
+        Args:
+            target_ids: set of int - 処理対象のアノテーションID
+        """
+        for annotation in self.annotations:
+            if annotation['id'] not in target_ids:
+                continue
+            
+            annotation_id = annotation['id']
+            defect_type = annotation.get('defect_type', '不具合')
+            shape = annotation.get('shape', 'cross')
+            color = self.defect_types.get(defect_type, '#FF0000')
+            
+            # サーモ画像の処理
+            if annotation.get('thermal_image'):
+                src_path = annotation['thermal_image']
+                thermal_overlays = annotation.get('thermal_overlays', [])
+                
+                if os.path.exists(src_path) and thermal_overlays:
+                    try:
+                        thermal_image = Image.open(src_path)
+                        
+                        for overlay_point in thermal_overlays:
+                            x = overlay_point['x']
+                            y = overlay_point['y']
+                            
+                            thermal_image = self._draw_annotation_on_related_image(
+                                thermal_image, x, y, annotation_id,
+                                defect_type, color, shape, image_type='thermal'
+                            )
+                        
+                        annotated_thermal = thermal_image
+                        ext = os.path.splitext(src_path)[1]
+                        filename = f"ID{annotation_id:03d}_{defect_type}_サーモ異常{ext}"
+                        dst_path = os.path.join(self.project_path, "サーモ画像フォルダ", filename)
+                        
+                        if ext.lower() in ['.jpg', '.jpeg']:
+                            if annotated_thermal.mode == 'RGBA':
+                                rgb_image = Image.new('RGB', annotated_thermal.size, (255, 255, 255))
+                                rgb_image.paste(annotated_thermal, mask=annotated_thermal.split()[3])
+                                annotated_thermal = rgb_image
+                            elif annotated_thermal.mode != 'RGB':
+                                annotated_thermal = annotated_thermal.convert('RGB')
+                            annotated_thermal.save(dst_path, 'JPEG', quality=95)
+                        else:
+                            annotated_thermal.save(dst_path)
+                            
+                    except Exception as e:
+                        print(f"[WARN] サーモ画像の処理に失敗 (ID{annotation_id}): {e}")
+            
+            # 可視画像の処理
+            if annotation.get('visible_image'):
+                src_path = annotation['visible_image']
+                visible_overlays = annotation.get('visible_overlays', [])
+                
+                if os.path.exists(src_path) and visible_overlays:
+                    try:
+                        visible_image = Image.open(src_path)
+                        
+                        for overlay_point in visible_overlays:
+                            x = overlay_point['x']
+                            y = overlay_point['y']
+                            
+                            visible_image = self._draw_annotation_on_related_image(
+                                visible_image, x, y, annotation_id,
+                                defect_type, color, shape, image_type='visible'
+                            )
+                        
+                        annotated_visible = visible_image
+                        ext = os.path.splitext(src_path)[1]
+                        filename = f"ID{annotation_id:03d}_{defect_type}_可視異常{ext}"
+                        dst_path = os.path.join(self.project_path, "可視画像フォルダ", filename)
+                        
+                        if ext.lower() in ['.jpg', '.jpeg']:
+                            if annotated_visible.mode == 'RGBA':
+                                rgb_image = Image.new('RGB', annotated_visible.size, (255, 255, 255))
+                                rgb_image.paste(annotated_visible, mask=annotated_visible.split()[3])
+                                annotated_visible = rgb_image
+                            elif annotated_visible.mode != 'RGB':
+                                annotated_visible = annotated_visible.convert('RGB')
+                            annotated_visible.save(dst_path, 'JPEG', quality=95)
+                        else:
+                            annotated_visible.save(dst_path)
+                            
+                    except Exception as e:
+                        print(f"[WARN] 可視画像の処理に失敗 (ID{annotation_id}): {e}")
+
+    def delete_related_images(self, deleted_ids):
+        """
+        削除されたアノテーションの画像ファイルを削除
+        
+        Args:
+            deleted_ids: set of int - 削除されたアノテーションID
+        """
+        import glob
+        
+        for aid in deleted_ids:
+            # サーモ画像の削除
+            thermal_pattern = f"ID{aid:03d}_*_サーモ異常.*"
+            thermal_folder = os.path.join(self.project_path, "サーモ画像フォルダ")
+            if os.path.exists(thermal_folder):
+                for file in glob.glob(os.path.join(thermal_folder, thermal_pattern)):
+                    try:
+                        os.remove(file)
+                        print(f"[INFO] 削除: {file}")
+                    except Exception as e:
+                        print(f"[WARN] ファイル削除失敗: {file}, {e}")
+            
+            # 可視画像の削除
+            visible_pattern = f"ID{aid:03d}_*_可視異常.*"
+            visible_folder = os.path.join(self.project_path, "可視画像フォルダ")
+            if os.path.exists(visible_folder):
+                for file in glob.glob(os.path.join(visible_folder, visible_pattern)):
+                    try:
+                        os.remove(file)
+                        print(f"[INFO] 削除: {file}")
+                    except Exception as e:
+                        print(f"[WARN] ファイル削除失敗: {file}, {e}")
+            
+            # 個別全体図の削除
+            individual_pattern = f"ID{aid:03d}_*.*"
+            individual_folder = os.path.join(self.project_path, "個別全体図フォルダ")
+            if os.path.exists(individual_folder):
+                for file in glob.glob(os.path.join(individual_folder, individual_pattern)):
+                    try:
+                        os.remove(file)
+                        print(f"[INFO] 削除: {file}")
+                    except Exception as e:
+                        print(f"[WARN] ファイル削除失敗: {file}, {e}")
+
+    def save_individual_annotated_images_incremental(self, target_ids):
+        """
+        指定されたIDの個別全体図のみを生成（差分保存）
+        
+        Args:
+            target_ids: set of int - 処理対象のアノテーションID
+        """
+        if not self.current_image:
+            return
+        
+        for annotation in sorted(self.annotations, key=lambda x: x['id']):
+            if annotation['id'] not in target_ids:
+                continue
+            
+            annotation_id = annotation['id']
+            x = annotation['x']
+            y = annotation['y']
+            defect_type = annotation.get('defect_type', '不具合')
+            color = self.defect_types.get(defect_type, '#FF0000')
+            shape = annotation.get('shape', 'cross')
+            
+            # 画像をコピー
+            annotated_image = self.current_image.copy()
+            draw = ImageDraw.Draw(annotated_image)
+            overall_scale = self._get_annotation_scale("overall")
+            
+            # 該当アノテーションのみ描画
+            annotation_y = y
+            icon_height = self.draw_annotation_icon_on_image(
+                annotated_image, draw, x, annotation_y,
+                defect_type, color, shape, overall_scale,
+                image_type='ortho'
+            )
+            
+            self._draw_id_label_on_image(
+                draw, x, annotation_y, annotation_id, color,
+                annotated_image.size, overall_scale, icon_height,
+                image_type='ortho'
+            )
+            
+            # 保存
+            individual_folder = os.path.join(self.project_path, "個別全体図フォルダ")
+            os.makedirs(individual_folder, exist_ok=True)
+            
+            base_name, ext = os.path.splitext(os.path.basename(self.image_path))
+            filename = f"ID{annotation_id:03d}_{defect_type}{ext}"
+            dst_path = os.path.join(individual_folder, filename)
+            
+            if ext.lower() in ['.jpg', '.jpeg']:
+                if annotated_image.mode == 'RGBA':
+                    rgb_image = Image.new('RGB', annotated_image.size, (255, 255, 255))
+                    rgb_image.paste(annotated_image, mask=annotated_image.split()[3])
+                    annotated_image = rgb_image
+                elif annotated_image.mode != 'RGB':
+                    annotated_image = annotated_image.convert('RGB')
+                annotated_image.save(dst_path, 'JPEG', quality=95)
+            else:
+                annotated_image.save(dst_path)
+
+    def _create_save_message(self, changes, generate_images):
+        """
+        保存時のメッセージを生成
+        
+        Args:
+            changes: detect_changes()の結果
+            generate_images: 画像を生成したかどうか
+        
+        Returns:
+            str: メッセージ
+        """
+        added_count = len(changes['added_ids'])
+        changed_count = len(changes['changed_ids'])
+        deleted_count = len(changes['deleted_ids'])
+        text_only_count = len(changes.get('text_only_changed_ids', set()))
+        
+        if not generate_images and changes['has_text_only_changes']:
+            # 画像生成をスキップした場合
+            message = f"プロジェクト '{self.project_name}' を保存しました。\n\n"
+            message += "一覧表のみを更新しました（画像は再生成されませんでした）。\n"
+            if text_only_count > 0:
+                message += f"- テキスト変更: {text_only_count}件"
+            return message
+        
+        if added_count == 0 and changed_count == 0 and deleted_count == 0 and text_only_count == 0:
+            # 変更なし
+            return f"プロジェクト '{self.project_name}' を保存しました。\n\n変更がないため、一覧表のみを更新しました。"
+        
+        # 変更あり
+        message = f"プロジェクト '{self.project_name}' を保存しました。\n\n"
+        details = []
+        if added_count > 0:
+            details.append(f"追加: {added_count}件")
+        if changed_count > 0:
+            details.append(f"変更: {changed_count}件")
+        if deleted_count > 0:
+            details.append(f"削除: {deleted_count}件")
+        if text_only_count > 0 and generate_images:
+            details.append(f"テキスト変更: {text_only_count}件")
+        
+        message += "\n".join(f"- {detail}" for detail in details)
+        return message
+
     def quit_application(self):
-        """アプリケーションを終了"""
-        if self.annotations:
-            result = messagebox.askyesnocancel("確認", "変更を保存しますか？")
-            if result is True:  # Yes
+        """アプリケーションを終了（未保存変更の警告付き）"""
+        # 未保存の変更がある場合は警告
+        if self.has_unsaved_changes:
+            result = messagebox.askyesnocancel(
+                "未保存の変更",
+                "保存していない変更があります。保存しますか？\n\n"
+                "・はい: 保存して終了\n"
+                "・いいえ: 保存せずに終了\n"
+                "・キャンセル: 終了を中止"
+            )
+            if result is None:  # キャンセル
+                return
+            elif result:  # はい
                 self.save_project()
-                self.root.quit()
+                # save_project でキャンセルされた場合は終了しない
+                if self.has_unsaved_changes:
+                    return
+        
+        self.root.quit()
             elif result is False:  # No
                 self.root.quit()
             # Cancel の場合は何もしない
