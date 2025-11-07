@@ -4680,9 +4680,12 @@ class OrthoImageAnnotationSystem:
             # 変更を検出
             changes = self.detect_changes()
             
-            # テキストのみ変更の場合、画像生成の確認
+            # 保存方法の選択
             generate_images = True
+            use_incremental_save = True  # デフォルトは差分保存
+            
             if changes['has_text_only_changes'] and not changes['has_visual_changes']:
+                # テキストのみ変更の場合、画像生成の確認
                 result = messagebox.askyesnocancel(
                     "画像生成の確認",
                     "画像に影響しない変更（テキスト情報のみ）が検出されました。\n\n"
@@ -4695,6 +4698,88 @@ class OrthoImageAnnotationSystem:
                 if result is None:  # キャンセル
                     return
                 generate_images = result
+            elif changes['has_visual_changes']:
+                # 画像に影響する変更がある場合、保存方法を選択
+                dialog = tk.Toplevel(self.root)
+                dialog.title("保存方法の選択")
+                dialog.geometry("500x250")
+                dialog.transient(self.root)
+                dialog.grab_set()
+                
+                # ダイアログの中央配置
+                dialog.update_idletasks()
+                x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+                y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+                dialog.geometry(f"+{x}+{y}")
+                
+                selected_mode = tk.StringVar(value="incremental")
+                
+                frame = ttk.Frame(dialog, padding=20)
+                frame.pack(fill=tk.BOTH, expand=True)
+                
+                ttk.Label(
+                    frame,
+                    text="画像に影響する変更が検出されました。\n保存方法を選択してください：",
+                    font=("", 10)
+                ).pack(pady=(0, 15))
+                
+                # 差分保存オプション
+                rb_incremental = ttk.Radiobutton(
+                    frame,
+                    text="差分保存（推奨）- 変更された部分のみ再生成",
+                    variable=selected_mode,
+                    value="incremental"
+                )
+                rb_incremental.pack(anchor=tk.W, pady=5)
+                
+                ttk.Label(
+                    frame,
+                    text="  → 高速。オフセット・倍率変更時は該当画像のみ更新",
+                    foreground="gray",
+                    font=("", 9)
+                ).pack(anchor=tk.W, padx=20)
+                
+                # 全更新オプション
+                rb_full = ttk.Radiobutton(
+                    frame,
+                    text="全更新 - すべての画像を再生成",
+                    variable=selected_mode,
+                    value="full"
+                )
+                rb_full.pack(anchor=tk.W, pady=(15, 5))
+                
+                ttk.Label(
+                    frame,
+                    text="  → 時間がかかりますが、すべての画像が最新状態に",
+                    foreground="gray",
+                    font=("", 9)
+                ).pack(anchor=tk.W, padx=20)
+                
+                # ボタンフレーム
+                button_frame = ttk.Frame(frame)
+                button_frame.pack(pady=(20, 0))
+                
+                user_choice = {'confirmed': False}
+                
+                def on_ok():
+                    user_choice['confirmed'] = True
+                    user_choice['mode'] = selected_mode.get()
+                    dialog.destroy()
+                
+                def on_cancel():
+                    user_choice['confirmed'] = False
+                    dialog.destroy()
+                
+                ttk.Button(button_frame, text="OK", command=on_ok, width=10).pack(side=tk.LEFT, padx=5)
+                ttk.Button(button_frame, text="キャンセル", command=on_cancel, width=10).pack(side=tk.LEFT, padx=5)
+                
+                # ダイアログを表示して待機
+                dialog.wait_window()
+                
+                if not user_choice['confirmed']:
+                    return  # キャンセル
+                
+                use_incremental_save = (user_choice['mode'] == 'incremental')
             
             # アノテーション設定を保存（常に実行）
             annotation_data = {
@@ -4726,54 +4811,63 @@ class OrthoImageAnnotationSystem:
                 if changes['deleted_ids']:
                     self.delete_related_images(changes['deleted_ids'])
                 
-                # どの画像タイプを再生成するか決定
-                # 色変更時は全タイプ、オフセットのみ変更時は該当タイプのみ
-                changed_offset_types = changes['changed_offset_types']
-                color_changed = changes['color_changed']
-                
-                # 再生成が必要な画像タイプを決定
-                if color_changed:
-                    # 色変更は全画像タイプに影響
-                    related_image_types = {'thermal', 'visible'}
-                    need_ortho_redraw = True
-                    regenerated_types = {'thermal', 'visible', 'ortho'}
-                elif changed_offset_types:
-                    # オフセット変更の場合、変更されたタイプのみ
-                    related_image_types = changed_offset_types & {'thermal', 'visible'}
-                    need_ortho_redraw = 'ortho' in changed_offset_types
-                    regenerated_types = changed_offset_types.copy()
-                else:
-                    # アノテーション内容の変更（位置、タイプ等）は全タイプ
-                    related_image_types = {'thermal', 'visible'}
-                    need_ortho_redraw = True
-                    if changes['changed_ids'] or changes['added_ids']:
-                        regenerated_types = {'thermal', 'visible', 'ortho'}
-                
-                # 変更・追加されたアノテーションの関連画像を生成
-                if changes['changed_ids'] or changes['added_ids']:
-                    target_ids = changes['changed_ids'] | changes['added_ids']
-                    self.copy_related_images_incremental(target_ids, related_image_types)
-                
-                # オフセットのみ変更で全アノテーションが対象の場合
-                elif changed_offset_types and not changes['changed_ids']:
+                if not use_incremental_save:
+                    # 全更新モード：すべてのアノテーションの全画像を再生成
                     all_ids = set(a['id'] for a in self.annotations)
-                    self.copy_related_images_incremental(all_ids, related_image_types)
-                
-                # 全体図の再生成（必要な場合のみ）
-                if changes['need_full_redraw'] and need_ortho_redraw:
+                    self.copy_related_images_incremental(all_ids, {'thermal', 'visible'})
                     self.save_annotated_image()
-                
-                # 個別全体図の再生成
-                if need_ortho_redraw:
-                    if changes['need_individual_redraw']:
-                        # アノテーション変更がある場合
-                        self.save_individual_annotated_images_incremental(
-                            changes['need_individual_redraw']
-                        )
-                    elif 'ortho' in changed_offset_types:
-                        # オルソオフセットのみ変更の場合は全アノテーション
+                    self.save_individual_annotated_images_incremental(all_ids)
+                    regenerated_types = {'thermal', 'visible', 'ortho'}
+                else:
+                    # 差分保存モード：変更された部分のみ再生成
+                    # どの画像タイプを再生成するか決定
+                    changed_offset_types = changes['changed_offset_types']
+                    color_changed = changes['color_changed']
+                    scale_changed = changes['scale_changed']
+                    
+                    # 再生成が必要な画像タイプを決定
+                    if color_changed or scale_changed:
+                        # 色・倍率変更は全画像タイプに影響
+                        related_image_types = {'thermal', 'visible'}
+                        need_ortho_redraw = True
+                        regenerated_types = {'thermal', 'visible', 'ortho'}
+                    elif changed_offset_types:
+                        # オフセット変更の場合、変更されたタイプのみ
+                        related_image_types = changed_offset_types & {'thermal', 'visible'}
+                        need_ortho_redraw = 'ortho' in changed_offset_types
+                        regenerated_types = changed_offset_types.copy()
+                    else:
+                        # アノテーション内容の変更（位置、タイプ等）は全タイプ
+                        related_image_types = {'thermal', 'visible'}
+                        need_ortho_redraw = True
+                        if changes['changed_ids'] or changes['added_ids']:
+                            regenerated_types = {'thermal', 'visible', 'ortho'}
+                    
+                    # 変更・追加されたアノテーションの関連画像を生成
+                    if changes['changed_ids'] or changes['added_ids']:
+                        target_ids = changes['changed_ids'] | changes['added_ids']
+                        self.copy_related_images_incremental(target_ids, related_image_types)
+                    
+                    # オフセット・倍率のみ変更で全アノテーションが対象の場合
+                    elif (changed_offset_types or scale_changed) and not changes['changed_ids']:
                         all_ids = set(a['id'] for a in self.annotations)
-                        self.save_individual_annotated_images_incremental(all_ids)
+                        self.copy_related_images_incremental(all_ids, related_image_types)
+                    
+                    # 全体図の再生成（必要な場合のみ）
+                    if changes['need_full_redraw'] and need_ortho_redraw:
+                        self.save_annotated_image()
+                    
+                    # 個別全体図の再生成
+                    if need_ortho_redraw:
+                        if changes['need_individual_redraw']:
+                            # アノテーション変更がある場合
+                            self.save_individual_annotated_images_incremental(
+                                changes['need_individual_redraw']
+                            )
+                        elif 'ortho' in changed_offset_types or scale_changed:
+                            # オルソオフセットまたは倍率のみ変更の場合は全アノテーション
+                            all_ids = set(a['id'] for a in self.annotations)
+                            self.save_individual_annotated_images_incremental(all_ids)
             
             # スナップショットを更新
             self.update_snapshot()
@@ -5463,6 +5557,11 @@ class OrthoImageAnnotationSystem:
                 'ortho_y': self.ortho_offset_y,
             },
             'colors': copy.deepcopy(self.defect_types),
+            'scales': {
+                'overall': self.annotation_scale_vars.get('overall', tk.StringVar(value='1.0')).get(),
+                'thermal': self.annotation_scale_vars.get('thermal', tk.StringVar(value='1.0')).get(),
+                'visible': self.annotation_scale_vars.get('visible', tk.StringVar(value='1.0')).get(),
+            },
         }
 
     def update_snapshot(self):
@@ -5484,6 +5583,7 @@ class OrthoImageAnnotationSystem:
                 'has_text_only_changes': bool,   # テキストのみの変更があるか
                 'changed_offset_types': set,     # 変更されたオフセットタイプ {'thermal', 'visible', 'ortho'}
                 'color_changed': bool,           # 色設定が変更されたか
+                'scale_changed': bool,           # 倍率設定が変更されたか
             }
         """
         if not self.last_saved_snapshot:
@@ -5499,6 +5599,7 @@ class OrthoImageAnnotationSystem:
                 'has_text_only_changes': False,
                 'changed_offset_types': {'thermal', 'visible', 'ortho'},  # 初回は全タイプ
                 'color_changed': True,
+                'scale_changed': True,
             }
         
         current = {a['id']: a for a in self.annotations}
@@ -5521,13 +5622,14 @@ class OrthoImageAnnotationSystem:
             elif change_type == 'text':
                 text_only_changed_ids.add(aid)
         
-        # オフセット・色の変更チェック
+        # オフセット・色・倍率の変更チェック
         changed_offset_types = self._offset_changed()  # set: {'thermal', 'visible', 'ortho'}
         color_changed = self._color_changed()
+        scale_changed = self._scale_changed()
         
         # 画像に影響する変更があるか
         has_visual_changes = bool(visual_changed_ids or added_ids or deleted_ids or 
-                                  changed_offset_types or color_changed)
+                                  changed_offset_types or color_changed or scale_changed)
         
         # テキストのみの変更があるか
         has_text_only_changes = bool(text_only_changed_ids) and not has_visual_changes
@@ -5549,6 +5651,7 @@ class OrthoImageAnnotationSystem:
             'text_only_changed_ids': text_only_changed_ids,
             'changed_offset_types': changed_offset_types,
             'color_changed': color_changed,
+            'scale_changed': scale_changed,
         }
 
     def _annotation_changed(self, old, new):
@@ -5620,6 +5723,31 @@ class OrthoImageAnnotationSystem:
         
         prev_colors = self.last_saved_snapshot['colors']
         return self.defect_types != prev_colors
+    
+    def _scale_changed(self):
+        """
+        倍率設定が変更されたか判定
+        
+        Returns:
+            bool: 倍率が変更された場合True
+        """
+        if not self.last_saved_snapshot:
+            return False
+        
+        # 古いスナップショット（scales がない）の場合は変更なしとする
+        prev_scales = self.last_saved_snapshot.get('scales')
+        if prev_scales is None:
+            return False
+        
+        # 現在の倍率値を取得
+        current_scales = {
+            'overall': self.annotation_scale_vars.get('overall', tk.StringVar(value='1.0')).get(),
+            'thermal': self.annotation_scale_vars.get('thermal', tk.StringVar(value='1.0')).get(),
+            'visible': self.annotation_scale_vars.get('visible', tk.StringVar(value='1.0')).get(),
+        }
+        
+        # 比較（文字列として比較）
+        return current_scales != prev_scales
 
     def copy_related_images_incremental(self, target_ids, image_types=None):
         """
@@ -5857,6 +5985,24 @@ class OrthoImageAnnotationSystem:
             details.append(f"削除: {deleted_count}件")
         if text_only_count > 0 and generate_images:
             details.append(f"テキスト変更: {text_only_count}件")
+        
+        # オフセット・色・倍率の変更情報
+        if changes.get('changed_offset_types'):
+            offset_names = []
+            if 'thermal' in changes['changed_offset_types']:
+                offset_names.append('サーモ')
+            if 'visible' in changes['changed_offset_types']:
+                offset_names.append('可視')
+            if 'ortho' in changes['changed_offset_types']:
+                offset_names.append('オルソ')
+            if offset_names:
+                details.append(f"オフセット変更: {', '.join(offset_names)}")
+        
+        if changes.get('color_changed'):
+            details.append("色設定変更")
+        
+        if changes.get('scale_changed'):
+            details.append("倍率設定変更")
         
         message += "\n".join(f"- {detail}" for detail in details)
         
