@@ -5052,33 +5052,45 @@ class OrthoImageAnnotationSystem:
         - アノテーション入り画像のみを保存
         - オフセット設定を適用
         - 統一された命名規則: ID{id:03d}_{defect_type}_サーモ異常/可視異常{ext}
+        
+        修正内容（Requirement 4対応）:
+        - thermal_overlays/visible_overlaysに保存された座標を使用
+        - 編集ダイアログで設定した位置を基準にオフセット適用
         """
         for annotation in self.annotations:
             annotation_id = annotation['id']
             defect_type = annotation.get('defect_type', '不具合')
-            x = annotation['x']
-            y = annotation['y']
             shape = annotation.get('shape', 'cross')
             color = self.defect_types.get(defect_type, '#FF0000')
             
             # サーモ画像の処理
             if annotation.get('thermal_image'):
                 src_path = annotation['thermal_image']
-                if os.path.exists(src_path):
+                # thermal_overlaysから座標を取得（編集ダイアログで設定した位置）
+                thermal_overlays = annotation.get('thermal_overlays', [])
+                
+                if os.path.exists(src_path) and thermal_overlays:
                     try:
                         # 画像を読み込み
                         thermal_image = Image.open(src_path)
                         
-                        # アノテーションを描画
-                        annotated_thermal = self._draw_annotation_on_related_image(
-                            thermal_image,
-                            x, y,
-                            annotation_id,
-                            defect_type,
-                            color,
-                            shape,
-                            image_type='thermal'
-                        )
+                        # thermal_overlaysの各座標にアノテーションを描画
+                        for overlay_point in thermal_overlays:
+                            x = overlay_point['x']
+                            y = overlay_point['y']
+                            
+                            # アノテーションを描画
+                            thermal_image = self._draw_annotation_on_related_image(
+                                thermal_image,
+                                x, y,
+                                annotation_id,
+                                defect_type,
+                                color,
+                                shape,
+                                image_type='thermal'
+                            )
+                        
+                        annotated_thermal = thermal_image
                         
                         # ファイル名を生成（命名規則に従う）
                         ext = os.path.splitext(src_path)[1]
@@ -5103,21 +5115,31 @@ class OrthoImageAnnotationSystem:
             # 可視画像の処理
             if annotation.get('visible_image'):
                 src_path = annotation['visible_image']
-                if os.path.exists(src_path):
+                # visible_overlaysから座標を取得（編集ダイアログで設定した位置）
+                visible_overlays = annotation.get('visible_overlays', [])
+                
+                if os.path.exists(src_path) and visible_overlays:
                     try:
                         # 画像を読み込み
                         visible_image = Image.open(src_path)
                         
-                        # アノテーションを描画
-                        annotated_visible = self._draw_annotation_on_related_image(
-                            visible_image,
-                            x, y,
-                            annotation_id,
-                            defect_type,
-                            color,
-                            shape,
-                            image_type='visible'
-                        )
+                        # visible_overlaysの各座標にアノテーションを描画
+                        for overlay_point in visible_overlays:
+                            x = overlay_point['x']
+                            y = overlay_point['y']
+                            
+                            # アノテーションを描画
+                            visible_image = self._draw_annotation_on_related_image(
+                                visible_image,
+                                x, y,
+                                annotation_id,
+                                defect_type,
+                                color,
+                                shape,
+                                image_type='visible'
+                            )
+                        
+                        annotated_visible = visible_image
                         
                         # ファイル名を生成（命名規則に従う）
                         ext = os.path.splitext(src_path)[1]
