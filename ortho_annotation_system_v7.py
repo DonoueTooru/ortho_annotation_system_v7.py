@@ -4625,6 +4625,13 @@ class OrthoImageAnnotationSystem:
         button_frame.pack(fill=tk.X, padx=10, pady=20)
 
         def apply_settings():
+            # 色設定変更チェック（変更前）
+            color_changed = False
+            for defect_type, color_var in color_vars.items():
+                if self.defect_types.get(defect_type) != color_var.get():
+                    color_changed = True
+                    break
+            
             # 色設定を適用
             for defect_type, color_var in color_vars.items():
                 self.defect_types[defect_type] = color_var.get()
@@ -4650,10 +4657,11 @@ class OrthoImageAnnotationSystem:
             # オフセット設定を保存
             self.save_offset_settings()
             
-            # 変更追跡：オフセット変更時は全アノテーションが変更対象
-            if offset_changed:
+            # 変更追跡：オフセットまたは色が変更された場合のみフラグを立てる
+            # detect_changes()が詳細な変更内容を検出するため、
+            # ここでは changed_annotation_ids を操作しない
+            if offset_changed or color_changed:
                 self.has_unsaved_changes = True
-                self.changed_annotation_ids = set(a['id'] for a in self.annotations)
             
             # 表示を更新
             self.draw_annotations()
@@ -4712,25 +4720,60 @@ class OrthoImageAnnotationSystem:
                 print(f"[WARN] v2出力でエラー: {e}")
             
             # 画像生成処理（変更がある場合のみ、またはユーザーが選択した場合）
+            regenerated_types = set()  # 再生成された画像タイプを記録
             if generate_images:
                 # 削除されたアノテーションの画像を削除
                 if changes['deleted_ids']:
                     self.delete_related_images(changes['deleted_ids'])
                 
+                # どの画像タイプを再生成するか決定
+                # 色変更時は全タイプ、オフセットのみ変更時は該当タイプのみ
+                changed_offset_types = changes['changed_offset_types']
+                color_changed = changes['color_changed']
+                
+                # 再生成が必要な画像タイプを決定
+                if color_changed:
+                    # 色変更は全画像タイプに影響
+                    related_image_types = {'thermal', 'visible'}
+                    need_ortho_redraw = True
+                    regenerated_types = {'thermal', 'visible', 'ortho'}
+                elif changed_offset_types:
+                    # オフセット変更の場合、変更されたタイプのみ
+                    related_image_types = changed_offset_types & {'thermal', 'visible'}
+                    need_ortho_redraw = 'ortho' in changed_offset_types
+                    regenerated_types = changed_offset_types.copy()
+                else:
+                    # アノテーション内容の変更（位置、タイプ等）は全タイプ
+                    related_image_types = {'thermal', 'visible'}
+                    need_ortho_redraw = True
+                    if changes['changed_ids'] or changes['added_ids']:
+                        regenerated_types = {'thermal', 'visible', 'ortho'}
+                
                 # 変更・追加されたアノテーションの関連画像を生成
                 if changes['changed_ids'] or changes['added_ids']:
                     target_ids = changes['changed_ids'] | changes['added_ids']
-                    self.copy_related_images_incremental(target_ids)
+                    self.copy_related_images_incremental(target_ids, related_image_types)
+                
+                # オフセットのみ変更で全アノテーションが対象の場合
+                elif changed_offset_types and not changes['changed_ids']:
+                    all_ids = set(a['id'] for a in self.annotations)
+                    self.copy_related_images_incremental(all_ids, related_image_types)
                 
                 # 全体図の再生成（必要な場合のみ）
-                if changes['need_full_redraw']:
+                if changes['need_full_redraw'] and need_ortho_redraw:
                     self.save_annotated_image()
                 
-                # 個別全体図の再生成（変更されたIDのみ）
-                if changes['need_individual_redraw']:
-                    self.save_individual_annotated_images_incremental(
-                        changes['need_individual_redraw']
-                    )
+                # 個別全体図の再生成
+                if need_ortho_redraw:
+                    if changes['need_individual_redraw']:
+                        # アノテーション変更がある場合
+                        self.save_individual_annotated_images_incremental(
+                            changes['need_individual_redraw']
+                        )
+                    elif 'ortho' in changed_offset_types:
+                        # オルソオフセットのみ変更の場合は全アノテーション
+                        all_ids = set(a['id'] for a in self.annotations)
+                        self.save_individual_annotated_images_incremental(all_ids)
             
             # スナップショットを更新
             self.update_snapshot()
@@ -4738,7 +4781,7 @@ class OrthoImageAnnotationSystem:
             self.changed_annotation_ids.clear()
             
             # 成功メッセージ
-            message = self._create_save_message(changes, generate_images)
+            message = self._create_save_message(changes, generate_images, regenerated_types)
             messagebox.showinfo("成功", message)
 
         except Exception as e:
@@ -5439,6 +5482,8 @@ class OrthoImageAnnotationSystem:
                 'need_individual_redraw': set,   # 個別全体図の再描画が必要なID
                 'has_visual_changes': bool,      # 画像に影響する変更があるか
                 'has_text_only_changes': bool,   # テキストのみの変更があるか
+                'changed_offset_types': set,     # 変更されたオフセットタイプ {'thermal', 'visible', 'ortho'}
+                'color_changed': bool,           # 色設定が変更されたか
             }
         """
         if not self.last_saved_snapshot:
@@ -5452,6 +5497,8 @@ class OrthoImageAnnotationSystem:
                 'need_individual_redraw': all_ids,
                 'has_visual_changes': True,
                 'has_text_only_changes': False,
+                'changed_offset_types': {'thermal', 'visible', 'ortho'},  # 初回は全タイプ
+                'color_changed': True,
             }
         
         current = {a['id']: a for a in self.annotations}
@@ -5475,12 +5522,12 @@ class OrthoImageAnnotationSystem:
                 text_only_changed_ids.add(aid)
         
         # オフセット・色の変更チェック
-        offset_changed = self._offset_changed()
+        changed_offset_types = self._offset_changed()  # set: {'thermal', 'visible', 'ortho'}
         color_changed = self._color_changed()
         
         # 画像に影響する変更があるか
         has_visual_changes = bool(visual_changed_ids or added_ids or deleted_ids or 
-                                  offset_changed or color_changed)
+                                  changed_offset_types or color_changed)
         
         # テキストのみの変更があるか
         has_text_only_changes = bool(text_only_changed_ids) and not has_visual_changes
@@ -5500,6 +5547,8 @@ class OrthoImageAnnotationSystem:
             'has_visual_changes': has_visual_changes,
             'has_text_only_changes': has_text_only_changes,
             'text_only_changed_ids': text_only_changed_ids,
+            'changed_offset_types': changed_offset_types,
+            'color_changed': color_changed,
         }
 
     def _annotation_changed(self, old, new):
@@ -5534,19 +5583,35 @@ class OrthoImageAnnotationSystem:
         return None
 
     def _offset_changed(self):
-        """オフセット設定が変更されたか判定"""
-        if not self.last_saved_snapshot:
-            return False
+        """
+        オフセット設定が変更されたか判定（詳細版）
         
+        Returns:
+            set: 変更されたオフセットタイプ {'thermal', 'visible', 'ortho'}
+                 変更がない場合は空のset
+        """
+        if not self.last_saved_snapshot:
+            return set()
+        
+        changed_types = set()
         prev_offsets = self.last_saved_snapshot['offsets']
-        return (
-            self.thermal_offset_x != prev_offsets['thermal_x'] or
-            self.thermal_offset_y != prev_offsets['thermal_y'] or
-            self.visible_offset_x != prev_offsets['visible_x'] or
-            self.visible_offset_y != prev_offsets['visible_y'] or
-            self.ortho_offset_x != prev_offsets['ortho_x'] or
-            self.ortho_offset_y != prev_offsets['ortho_y']
-        )
+        
+        # サーモ画像のオフセット変更チェック
+        if (self.thermal_offset_x != prev_offsets['thermal_x'] or
+            self.thermal_offset_y != prev_offsets['thermal_y']):
+            changed_types.add('thermal')
+        
+        # 可視画像のオフセット変更チェック
+        if (self.visible_offset_x != prev_offsets['visible_x'] or
+            self.visible_offset_y != prev_offsets['visible_y']):
+            changed_types.add('visible')
+        
+        # オルソ全体図のオフセット変更チェック
+        if (self.ortho_offset_x != prev_offsets['ortho_x'] or
+            self.ortho_offset_y != prev_offsets['ortho_y']):
+            changed_types.add('ortho')
+        
+        return changed_types
 
     def _color_changed(self):
         """色設定が変更されたか判定"""
@@ -5556,13 +5621,17 @@ class OrthoImageAnnotationSystem:
         prev_colors = self.last_saved_snapshot['colors']
         return self.defect_types != prev_colors
 
-    def copy_related_images_incremental(self, target_ids):
+    def copy_related_images_incremental(self, target_ids, image_types=None):
         """
         指定されたIDのアノテーションのみ関連画像を生成（差分保存）
         
         Args:
             target_ids: set of int - 処理対象のアノテーションID
+            image_types: set of str or None - 生成する画像タイプ {'thermal', 'visible'}
+                         Noneの場合は全タイプを生成
         """
+        if image_types is None:
+            image_types = {'thermal', 'visible'}  # デフォルトは全タイプ
         for annotation in self.annotations:
             if annotation['id'] not in target_ids:
                 continue
@@ -5573,7 +5642,7 @@ class OrthoImageAnnotationSystem:
             color = self.defect_types.get(defect_type, '#FF0000')
             
             # サーモ画像の処理
-            if annotation.get('thermal_image'):
+            if 'thermal' in image_types and annotation.get('thermal_image'):
                 src_path = annotation['thermal_image']
                 thermal_overlays = annotation.get('thermal_overlays', [])
                 
@@ -5610,7 +5679,7 @@ class OrthoImageAnnotationSystem:
                         print(f"[WARN] サーモ画像の処理に失敗 (ID{annotation_id}): {e}")
             
             # 可視画像の処理
-            if annotation.get('visible_image'):
+            if 'visible' in image_types and annotation.get('visible_image'):
                 src_path = annotation['visible_image']
                 visible_overlays = annotation.get('visible_overlays', [])
                 
@@ -5748,13 +5817,14 @@ class OrthoImageAnnotationSystem:
             else:
                 annotated_image.save(dst_path)
 
-    def _create_save_message(self, changes, generate_images):
+    def _create_save_message(self, changes, generate_images, regenerated_types=None):
         """
         保存時のメッセージを生成
         
         Args:
             changes: detect_changes()の結果
             generate_images: 画像を生成したかどうか
+            regenerated_types: set of str - 再生成された画像タイプ {'thermal', 'visible', 'ortho'}
         
         Returns:
             str: メッセージ
@@ -5789,6 +5859,21 @@ class OrthoImageAnnotationSystem:
             details.append(f"テキスト変更: {text_only_count}件")
         
         message += "\n".join(f"- {detail}" for detail in details)
+        
+        # 再生成された画像タイプを表示
+        if generate_images and regenerated_types:
+            type_names = []
+            if 'thermal' in regenerated_types:
+                type_names.append('サーモ画像')
+            if 'visible' in regenerated_types:
+                type_names.append('可視画像')
+            if 'ortho' in regenerated_types:
+                type_names.append('オルソ全体図')
+            
+            if type_names:
+                message += "\n\n再生成した画像:\n"
+                message += "\n".join(f"- {name}" for name in type_names)
+        
         return message
 
     def quit_application(self):
@@ -5802,21 +5887,24 @@ class OrthoImageAnnotationSystem:
                 "・いいえ: 保存せずに終了\n"
                 "・キャンセル: 終了を中止"
             )
+
             if result is None:  # キャンセル
                 return
+
             elif result:  # はい
                 self.save_project()
                 # save_project でキャンセルされた場合は終了しない
                 if self.has_unsaved_changes:
                     return
-        
-        self.root.quit()
-            elif result is False:  # No
                 self.root.quit()
-            # Cancel の場合は何もしない
+
+            elif result is False:  # いいえ（保存せず終了）
+                self.root.quit()
+
+            # ここでの Cancel は if result is None で処理済みなので何もしない
+
         else:
             self.root.quit()
-
     
 def main():
     """メイン関数"""
